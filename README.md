@@ -31,6 +31,13 @@ docker build -t commute-study-ai .
 docker run --rm -p 8000:8000 -e AI_INTERNAL_KEY=change-me commute-study-ai
 ```
 
+## 브랜치
+
+| 브랜치 | 역할 |
+| --- | --- |
+| `develop` | 기본 브랜치. 이슈별 `{Type}/#{번호}` 브랜치의 PR이 모인다 |
+| `main` | Railway 배포 브랜치. `develop` → `main` PR로만 바뀐다 |
+
 ## 백엔드 연동
 
 - 모든 `/v1` 요청에 `X-Internal-Key` 헤더가 필요하다. `/health`는 필요 없다.
