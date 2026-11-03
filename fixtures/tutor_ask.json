@@ -1,0 +1,4 @@
+{
+  "text": "큐는 먼저 들어온 것을 먼저 처리해야 할 때 써요. 프린터 인쇄 대기열이나 은행 번호표처럼 순서대로 처리하는 상황이 대표적이에요. (2쪽)",
+  "meta": { "model": "mock", "inputTokens": 0, "outputTokens": 0, "elapsedMs": 0, "attempts": 1 }
+}

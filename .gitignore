@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+# 강의자료는 저작권 때문에 올리지 않는다
+eval/data/

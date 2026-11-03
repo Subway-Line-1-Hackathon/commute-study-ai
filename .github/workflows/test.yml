@@ -1,0 +1,20 @@
+# 코드 테스트만 돌린다. OpenAI 키를 넣지 않으며 실제 API를 부르지 않는다.
+name: test
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest

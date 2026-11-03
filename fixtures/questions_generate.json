@@ -1,0 +1,50 @@
+{
+  "samples": {
+    "OX": {
+      "stem": "큐는 먼저 넣은 데이터가 먼저 나오는 구조다.",
+      "choices": [],
+      "answer": "O",
+      "acceptedAnswers": [],
+      "rubric": [],
+      "explanation": "큐는 FIFO 구조라 먼저 넣은 데이터가 먼저 나와요.",
+      "sourcePage": 2,
+      "evidenceQuote": "큐는 먼저 넣은 데이터가 먼저 나오는 구조다.",
+      "conceptTags": ["큐", "FIFO"]
+    },
+    "MC": {
+      "stem": "다음 중 FIFO 구조는?",
+      "choices": ["스택", "큐", "트리", "그래프"],
+      "answer": "2",
+      "acceptedAnswers": [],
+      "rubric": [],
+      "explanation": "큐는 먼저 넣은 데이터가 먼저 나오는 FIFO 구조예요.",
+      "sourcePage": 2,
+      "evidenceQuote": "큐는 먼저 넣은 데이터가 먼저 나오는 구조다.",
+      "conceptTags": ["큐", "FIFO"]
+    },
+    "SHORT": {
+      "stem": "나중에 넣은 데이터가 먼저 나오는 자료구조는?",
+      "choices": [],
+      "answer": "스택",
+      "acceptedAnswers": ["스택", "Stack"],
+      "rubric": [],
+      "explanation": "스택은 LIFO 구조예요.",
+      "sourcePage": 1,
+      "evidenceQuote": "스택은 나중에 넣은 데이터가 먼저 나오는 구조다.",
+      "conceptTags": ["스택", "LIFO"]
+    },
+    "ESSAY": {
+      "stem": "스택과 큐의 차이를 설명하시오.",
+      "choices": [],
+      "answer": "",
+      "acceptedAnswers": [],
+      "rubric": ["스택은 LIFO", "큐는 FIFO", "활용 사례"],
+      "explanation": "스택은 나중에 넣은 것이, 큐는 먼저 넣은 것이 먼저 나와요.",
+      "sourcePage": 1,
+      "evidenceQuote": "스택은 나중에 넣은 데이터가 먼저 나오는 구조다.",
+      "conceptTags": ["스택", "큐"]
+    }
+  },
+  "rejected": { "schema": 0, "evidence": 0, "duplicate": 0 },
+  "meta": { "model": "mock", "inputTokens": 0, "outputTokens": 0, "elapsedMs": 0, "attempts": 1 }
+}
