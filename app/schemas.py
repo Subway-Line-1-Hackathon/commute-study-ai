@@ -1,4 +1,4 @@
-"""요청 모델. 필드와 값은 docs/API_명세.md를 따른다."""
+"""요청 모델과 LLM 출력 모델. 요청 필드와 값은 docs/API_명세.md를 따른다."""
 
 from typing import Literal
 
@@ -107,3 +107,63 @@ class FeedbackRequest(Model):
     correct: int = Field(ge=0)
     correct_concepts: list[str] = []
     wrong_items: list[WrongItem] = []
+
+
+# LLM 출력 모델. LLM이 채우는 필드만 둔다. 유형·난이도·정답 번호는 코드가 채운다.
+# 구조화 출력은 모든 필드가 필수라 기본값을 두지 않는다.
+
+
+class CategoryDraft(BaseModel):
+    name: str
+    page_start: int
+    page_end: int
+    summary: str
+
+
+class CategoriesOut(BaseModel):
+    categories: list[CategoryDraft]
+
+
+class QuestionBase(BaseModel):
+    stem: str
+    explanation: str
+    source_page: int
+    evidence_quote: str
+    concept_tags: list[str]
+
+
+class OXDraft(QuestionBase):
+    answer: Literal["O", "X"]
+
+
+class MCDraft(QuestionBase):
+    correct_choice: str
+    wrong_choices: list[str]
+
+
+class ShortDraft(QuestionBase):
+    answer: str
+    accepted_answers: list[str]
+
+
+class EssayDraft(QuestionBase):
+    rubric: list[str]
+
+
+class OXOut(BaseModel):
+    questions: list[OXDraft]
+
+
+class MCOut(BaseModel):
+    questions: list[MCDraft]
+
+
+class ShortOut(BaseModel):
+    questions: list[ShortDraft]
+
+
+class EssayOut(BaseModel):
+    questions: list[EssayDraft]
+
+
+QUESTION_OUTPUTS: dict[str, type[BaseModel]] = {"OX": OXOut, "MC": MCOut, "SHORT": ShortOut, "ESSAY": EssayOut}
