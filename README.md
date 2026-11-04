@@ -2,7 +2,20 @@
 
 통학 AI 학습 앱의 AI 서버다. 백엔드만 호출하는 내부 API이고, DB 없이 요청을 받아 결과를 돌려준다.
 
-지금은 **mock 단계**다. 모든 API가 [API 명세](docs/API_명세.md) 형식의 고정 응답을 돌려준다. 실제 AI 연동은 [개발계획](docs/개발계획.md) 순서대로 붙인다.
+기본은 **mock**이다. 모든 API가 [API 명세](docs/API_명세.md) 형식의 고정 응답을 돌려준다. `AI_MOCK=false`로 두면 구현된 기능부터 실제 AI를 쓴다.
+
+| 기능 | 상태 |
+| --- | --- |
+| AI-01 단원화·요약 | 구현 (`AI_MOCK=false`일 때) |
+| AI-02~06 | mock |
+
+| 환경변수 | 설명 |
+| --- | --- |
+| `AI_INTERNAL_KEY` | 백엔드와 같은 내부 키. 필수 |
+| `AI_MOCK` | 기본 `true`. 실제 AI를 쓰려면 `false` |
+| `OPENAI_API_KEY` | 실제 AI를 쓸 때 필요 |
+| `SUPABASE_HOST` | 파일 URL로 허용할 호스트. 실제 AI를 쓸 때 필요 |
+| `MODEL_AI01`, `EFFORT_AI01` 등 | 기능별 모델·추론 강도 변경 (선택) |
 
 ## 실행
 
@@ -41,7 +54,7 @@ docker run --rm -p 8000:8000 -e AI_INTERNAL_KEY=change-me commute-study-ai
 ## 백엔드 연동
 
 - 모든 `/v1` 요청에 `X-Internal-Key` 헤더가 필요하다. `/health`는 필요 없다.
-- 실패 처리를 시험하려면 `X-Mock-Error` 헤더에 에러 코드를 넣는다. 예: `X-Mock-Error: LLM_FAILED`. AI-05는 글자 한 조각 뒤에 `error` 이벤트를 보낸다.
+- 실패 처리를 시험하려면 `X-Mock-Error` 헤더에 에러 코드를 넣는다. 예: `X-Mock-Error: LLM_FAILED`. AI-05는 글자 한 조각 뒤에 `error` 이벤트를 보낸다. `AI_MOCK=false`이면 이 헤더는 무시된다.
 - mock 응답은 `fixtures/`에 있다. AI-02는 요청한 유형·난이도·개수만큼 문제를 만들어 돌려준다.
 
 ## 문서
