@@ -84,7 +84,9 @@ async def process_material(req: ProcessMaterialRequest):
 
 
 @v1.post("/questions/generate", dependencies=fails)
-def generate_questions(req: GenerateQuestionsRequest):
+async def generate_questions(req: GenerateQuestionsRequest):
+    if not MOCK:
+        return await pipelines.generate_questions(req)
     data = fixture("questions_generate")
     specs = [(s.type, s.difficulty) for s in req.requests for _ in range(s.count)]
     questions = [
