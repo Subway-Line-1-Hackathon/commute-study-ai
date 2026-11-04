@@ -3,8 +3,10 @@
 SDK 자동 재시도는 끈다. 재시도 횟수와 시간 상한은 각 기능이 API 명세대로 정한다.
 """
 
+import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -29,6 +31,9 @@ _DEFAULTS = {
 }
 MODELS = {f: os.environ.get(f"MODEL_{f}", m) for f, (m, _) in _DEFAULTS.items()}
 EFFORTS = {f: os.environ.get(f"EFFORT_{f}", e) for f, (_, e) in _DEFAULTS.items()}
+
+RATE_LIMIT_WAITS = 3  # 분당 한도에 걸렸을 때 기다렸다 다시 보내는 최대 횟수
+MAX_RATE_LIMIT_WAIT = 30.0
 
 _client: AsyncOpenAI | None = None
 
@@ -83,8 +88,7 @@ async def parse[T: BaseModel](
     count_attempt: bool = True,
 ) -> T:
     """구조화 출력 호출 1회. 실패는 LLM_FAILED, 시간 초과는 LLM_TIMEOUT으로 바꾼다."""
-    timeout = deadline.remaining()
-    if timeout <= 0:
+    if deadline.remaining() <= 0:
         raise AIError("LLM_TIMEOUT")
     if count_attempt:
         usage.attempts += 1
@@ -92,23 +96,34 @@ async def parse[T: BaseModel](
     model = MODELS[feature]
     extra = {"prompt_cache_key": cache_key} if cache_key else {}
     started = time.monotonic()
-    try:
-        r = await client().responses.parse(
-            model=model,
-            instructions=instructions,
-            input=input,
-            text_format=schema,
-            reasoning={"effort": EFFORTS[feature]},
-            max_output_tokens=max_output_tokens,
-            timeout=timeout,
-            **extra,
-        )
-    except openai.APITimeoutError:
-        _log(feature, model, started, "LLM_TIMEOUT")
-        raise AIError("LLM_TIMEOUT") from None
-    except (openai.OpenAIError, ValueError) as e:  # ValueError: 잘린 JSON 등 파싱 실패
-        _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
-        raise AIError("LLM_FAILED") from None
+    for waits in range(RATE_LIMIT_WAITS + 1):
+        try:
+            r = await client().responses.parse(
+                model=model,
+                instructions=instructions,
+                input=input,
+                text_format=schema,
+                reasoning={"effort": EFFORTS[feature]},
+                max_output_tokens=max_output_tokens,
+                timeout=deadline.remaining(),
+                **extra,
+            )
+            break
+        except openai.RateLimitError as e:
+            # 분당 한도에 걸리면 알려준 시간만큼 기다린다. 요청 하나가 한도보다 크면 기다려도 소용없다.
+            delay = _retry_after(e)
+            too_long = delay > MAX_RATE_LIMIT_WAIT or delay >= deadline.remaining()  # 하루 한도는 몇십 분을 기다리라고 한다
+            if "Request too large" in str(e) or waits == RATE_LIMIT_WAITS or too_long:
+                _log(feature, model, started, "LLM_FAILED RateLimitError")
+                raise AIError("LLM_FAILED") from None
+            _log(feature, model, started, f"rate limited, wait {delay:.1f}s")
+            await asyncio.sleep(delay)
+        except openai.APITimeoutError:
+            _log(feature, model, started, "LLM_TIMEOUT")
+            raise AIError("LLM_TIMEOUT") from None
+        except (openai.OpenAIError, ValueError) as e:  # ValueError: 잘린 JSON 등 파싱 실패
+            _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
+            raise AIError("LLM_FAILED") from None
 
     if r.usage:
         usage.input_tokens += r.usage.input_tokens
@@ -119,6 +134,20 @@ async def parse[T: BaseModel](
         raise AIError("LLM_FAILED")
     _log(feature, model, started, "ok", r.usage)
     return r.output_parsed
+
+
+def _retry_after(e: openai.RateLimitError) -> float:
+    """기다릴 초. 헤더가 없으면 메시지의 "try again in 6s" 같은 문구를 읽는다."""
+    headers = e.response.headers
+    if ms := headers.get("retry-after-ms"):
+        delay = float(ms) / 1000
+    elif sec := headers.get("retry-after"):
+        delay = float(sec)
+    elif m := re.search(r"try again in ([\d.]+)(ms|s)", str(e)):
+        delay = float(m[1]) / (1000 if m[2] == "ms" else 1)
+    else:
+        delay = 2.0
+    return delay + 0.2
 
 
 def _log(feature: str, model: str, started: float, result: str, u=None):
