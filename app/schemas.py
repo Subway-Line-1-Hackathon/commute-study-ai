@@ -171,3 +171,12 @@ QUESTION_OUTPUTS: dict[str, type[BaseModel]] = {"OX": OXOut, "MC": MCOut, "SHORT
 
 class OcrText(BaseModel):
     text: str
+
+
+class JudgeOut(BaseModel):
+    correct: bool
+    reason: str
+
+
+class FeedbackOut(BaseModel):
+    feedback: str

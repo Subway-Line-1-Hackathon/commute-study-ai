@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import math
+from collections import Counter
 import os
 import random
 from pathlib import Path
@@ -12,13 +13,26 @@ import httpx2
 
 from app import extract, llm
 from app.errors import AIError
-from app.schemas import QUESTION_OUTPUTS, CategoriesOut, GenerateQuestionsRequest, OcrText, ProcessMaterialRequest, QuestionSpec
-from app.validate import InvalidOutput, check_questions, fix_categories
+from app.schemas import (
+    QUESTION_OUTPUTS,
+    CategoriesOut,
+    FeedbackOut,
+    FeedbackRequest,
+    GenerateQuestionsRequest,
+    JudgeOut,
+    JudgeShortRequest,
+    OcrText,
+    ProcessMaterialRequest,
+    QuestionSpec,
+)
+from app.validate import InvalidOutput, check_questions, fix_categories, normalize
 
 PROMPTS = Path(__file__).parent / "prompts"
 OCR_PROMPT = (PROMPTS / "OCR.md").read_text(encoding="utf-8")
 AI01_PROMPT = (PROMPTS / "AI-01.md").read_text(encoding="utf-8")
 AI02_PROMPT = (PROMPTS / "AI-02.md").read_text(encoding="utf-8")
+AI03_PROMPT = (PROMPTS / "AI-03.md").read_text(encoding="utf-8")
+AI06_PROMPT = (PROMPTS / "AI-06.md").read_text(encoding="utf-8")
 
 MAX_FILE_BYTES = 30 * 1024 * 1024
 DOWNLOAD_SECONDS = 30
@@ -37,6 +51,13 @@ AI02_MIN_ROUND_SECONDS = 20  # 남은 시간이 이보다 적으면 재생성하
 AI02_EXTRA = 1.2  # 검증에서 버려질 몫을 생각해 더 요청한다
 AI02_CHUNK = 10  # 한 호출에서 만드는 최대 문제 수. 출력이 길수록 느려져 나눠서 동시에 부른다
 AI02_TOKENS_PER_QUESTION = 600
+
+AI03_SECONDS = 4  # 사용자가 화면에서 기다린다. 실패하면 앱이 자가 판정으로 넘어가서 재시도하지 않는다
+AI03_MAX_ANSWER = 200
+AI06_SECONDS = 13
+AI06_MAX_WRONG_ITEMS = 20
+AI06_MAX_STEM = 100
+AI06_TOP_CONCEPTS = 3
 
 OCR_SECONDS = 120  # 단원화에 쓸 시간을 남기기 위한 OCR 몫
 OCR_CONCURRENCY = 8
@@ -238,3 +259,65 @@ async def _ask_questions(spec: QuestionSpec, count: int, category_id: int, docum
         max_output_tokens=count * AI02_TOKENS_PER_QUESTION + 2000,
         cache_key=f"category-{category_id}",
     )
+
+
+# ---------- AI-03 단답형 판정 ----------
+
+
+async def judge_short(req: JudgeShortRequest) -> dict:
+    answer = req.user_answer.strip()
+    if not answer:
+        return {"correct": False, "reason": "답을 입력하지 않았어요."}
+    # 백엔드도 먼저 비교하지만, 정규화 기준이 달라도 AI를 부르지 않게 여기서 한 번 더 본다.
+    if normalize(answer) in {normalize(a) for a in req.accepted_answers}:
+        return {"correct": True, "reason": "정답과 같아요."}
+
+    accepted = ", ".join(req.accepted_answers)
+    out = await llm.parse(
+        "AI03",
+        instructions=AI03_PROMPT,
+        input=(
+            f"문제: {req.stem}\n정답 목록: {accepted}\n해설: {req.explanation}\n"
+            f"<user_answer>{answer[:AI03_MAX_ANSWER]}</user_answer>"
+        ),
+        schema=JudgeOut,
+        deadline=llm.Deadline(AI03_SECONDS),
+        usage=llm.Usage(model=llm.MODELS["AI03"]),
+        max_output_tokens=300,
+    )
+    return {"correct": out.correct, "reason": out.reason.strip()}
+
+
+# ---------- AI-06 통학 후 피드백 ----------
+
+
+async def session_feedback(req: FeedbackRequest) -> dict:
+    if req.answered == 0:
+        raise AIError("INVALID_REQUEST", "푼 문제가 없는 세션은 피드백을 만들지 않아요.")
+
+    # 개념 집계는 코드가 한다. LLM에는 집계 결과만 넘겨 없는 개념을 지어내지 않게 한다.
+    wrong = _top(tag for item in req.wrong_items for tag in item.concept_tags)
+    good = _top(c for c in req.correct_concepts if c not in wrong)
+    stems = "\n".join(f"- {item.stem[:AI06_MAX_STEM]}" for item in req.wrong_items[:AI06_MAX_WRONG_ITEMS])
+    summary = (
+        f"모드: {'복습' if req.mode == 'REVIEW' else '커리큘럼'}\n"
+        f"문제 {req.total}개 중 {req.answered}개를 풀고 {req.correct}개를 맞혔다.\n"
+        f"잘한 개념: {', '.join(good) or '(없음)'}\n"
+        f"헷갈린 개념: {', '.join(wrong) or '(없음)'}\n"
+        f"틀린 문제:\n{stems or '(없음)'}"
+    )
+    out = await llm.parse(
+        "AI06",
+        instructions=AI06_PROMPT,
+        input=summary,
+        schema=FeedbackOut,
+        deadline=llm.Deadline(AI06_SECONDS),
+        usage=llm.Usage(model=llm.MODELS["AI06"]),
+        max_output_tokens=400,
+    )
+    return {"feedback": out.feedback.strip()}
+
+
+def _top(items) -> list[str]:
+    """많이 나온 순서로 상위 몇 개. 같은 횟수면 먼저 나온 것이 앞이다."""
+    return [name for name, _ in Counter(i.strip() for i in items if i.strip()).most_common(AI06_TOP_CONCEPTS)]

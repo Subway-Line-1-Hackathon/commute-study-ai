@@ -97,8 +97,10 @@ async def generate_questions(req: GenerateQuestionsRequest):
 
 
 @v1.post("/answers/judge-short", dependencies=fails)
-def judge_short(req: JudgeShortRequest):
-    return fixture("judge_short")
+async def judge_short(req: JudgeShortRequest):
+    if MOCK:
+        return fixture("judge_short")
+    return await pipelines.judge_short(req)
 
 
 @v1.post("/answers/grade-essay", dependencies=fails)
@@ -127,8 +129,10 @@ def tutor_ask(req: TutorAskRequest, error: AIError | None = Depends(mock_error))
 
 
 @v1.post("/sessions/feedback", dependencies=fails)
-def session_feedback(req: FeedbackRequest):
-    return fixture("sessions_feedback")
+async def session_feedback(req: FeedbackRequest):
+    if MOCK:
+        return fixture("sessions_feedback")
+    return await pipelines.session_feedback(req)
 
 
 app.include_router(v1)

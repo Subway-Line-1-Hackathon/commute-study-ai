@@ -342,7 +342,7 @@ data: {"meta":{"model":"...","inputTokens":5000,"outputTokens":120,"elapsedMs":3
 }
 ```
 
-- 호출 시점은 세션이 `COMPLETED` 또는 `ENDED`가 된 직후다. `answered`가 0이거나 S6 '새로 시작'으로 끝난 세션은 호출하지 않는다. 사용자가 S-50을 보지 않기 때문이다.
+- 호출 시점은 세션이 `COMPLETED` 또는 `ENDED`가 된 직후다. `answered`가 0이거나 S6 '새로 시작'으로 끝난 세션은 호출하지 않는다. 사용자가 S-50을 보지 않기 때문이다. `answered`가 0이면 AI 서버는 `400 INVALID_REQUEST`를 돌려준다.
 - `correctConcepts`, `wrongItems[].conceptTags`는 문제의 개념 태그에서 모은다 (9장 3번).
 
 **응답 200**
