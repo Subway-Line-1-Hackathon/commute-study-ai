@@ -11,12 +11,15 @@ import zipfile
 from dataclasses import dataclass
 
 import pypdfium2 as pdfium
+from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from app.errors import AIError
 
 MAX_PAGES = {"PDF": 100, "PPT": 100, "PNG": 20}
+IMAGE_MAX_SIDE = 1600  # OCR에 보내는 이미지의 긴 변
+JPEG_QUALITY = 80
 MIN_CHARS = 30  # 이보다 적으면 스캔 쪽으로 본다
 MIN_VALID_RATIO = 0.5  # 정상 문자가 이보다 적으면 깨진 글꼴로 본다
 
@@ -88,6 +91,35 @@ def _pdf_texts(data: bytes) -> list[str]:
             return [pdf[i].get_textpage().get_text_bounded() for i in range(len(pdf))]
         finally:
             pdf.close()
+
+
+def render_pdf_pages(data: bytes, pages: list[int]) -> dict[int, bytes]:
+    """OCR할 쪽을 JPEG로 만든다. 쪽 번호는 1부터다."""
+    # ponytail: 대상 쪽을 한꺼번에 메모리에 올린다 (100쪽이어도 수십 MB). 메모리가 모자라면 쪽마다 렌더링한다.
+    with _pdfium_lock:
+        pdf = pdfium.PdfDocument(data)
+        try:
+            images = {}
+            for n in pages:
+                page = pdf[n - 1]
+                scale = IMAGE_MAX_SIDE / max(page.get_size())
+                images[n] = _jpeg(page.render(scale=scale).to_pil())
+            return images
+        finally:
+            pdf.close()
+
+
+def to_jpeg(data: bytes) -> bytes:
+    """PNG 등 이미지를 OCR용 JPEG로 줄인다."""
+    image = Image.open(io.BytesIO(data))
+    image.thumbnail((IMAGE_MAX_SIDE, IMAGE_MAX_SIDE))
+    return _jpeg(image)
+
+
+def _jpeg(image: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, "JPEG", quality=JPEG_QUALITY)
+    return buf.getvalue()
 
 
 def _pptx_texts(data: bytes) -> list[str]:
