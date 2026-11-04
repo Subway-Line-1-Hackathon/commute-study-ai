@@ -22,10 +22,10 @@ TYPES = {".pdf": "PDF", ".pptx": "PPT", ".png": "PNG"}
 PRICES = {"gpt-6-luna": (0.10, 0.50), "gpt-6.1-terra": (1.0, 5.0), "gpt-6.1-sol": (2.0, 10.0)}
 
 
-def run(name: str, files: list[bytes], file_type: str):
+async def run(name: str, files: list[bytes], file_type: str):
     started = time.perf_counter()
     try:
-        out = asyncio.run(pipelines.process_files(files, file_type, llm.Deadline(pipelines.AI01_SECONDS)))
+        out = await pipelines.process_files(files, file_type, llm.Deadline(pipelines.AI01_SECONDS))
     except AIError as e:
         print(f"{name}: {e.code} - {e.message} ({time.perf_counter() - started:.0f}초)")
         return
@@ -42,15 +42,16 @@ def run(name: str, files: list[bytes], file_type: str):
         print(f"  {c['order']:>2}. {c['pageStart']:>3}~{c['pageEnd']:<3}쪽  {c['name']}")
 
 
-def main(paths: list[str]):
+async def main(paths: list[str]):
+    # 자료 여러 개를 한 이벤트 루프에서 돌린다. OpenAI 클라이언트가 처음 만든 루프에 묶이기 때문이다.
     pngs = sorted(Path(p) for p in paths if Path(p).suffix.lower() == ".png")
     for path in (Path(p) for p in paths if Path(p).suffix.lower() != ".png"):
-        run(path.name, [path.read_bytes()], TYPES.get(path.suffix.lower(), "PDF"))
+        await run(path.name, [path.read_bytes()], TYPES.get(path.suffix.lower(), "PDF"))
     if pngs:
-        run(f"{pngs[0].stem}_외_{len(pngs) - 1}장", [p.read_bytes() for p in pngs], "PNG")
+        await run(f"{pngs[0].stem}_외_{len(pngs) - 1}장", [p.read_bytes() for p in pngs], "PNG")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    main(sys.argv[1:])
+    asyncio.run(main(sys.argv[1:]))
