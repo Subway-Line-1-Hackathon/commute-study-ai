@@ -2,7 +2,9 @@
 
 import asyncio
 import base64
+import math
 import os
+import random
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -10,12 +12,13 @@ import httpx2
 
 from app import extract, llm
 from app.errors import AIError
-from app.schemas import CategoriesOut, OcrText, ProcessMaterialRequest
-from app.validate import InvalidOutput, fix_categories
+from app.schemas import QUESTION_OUTPUTS, CategoriesOut, GenerateQuestionsRequest, OcrText, ProcessMaterialRequest, QuestionSpec
+from app.validate import InvalidOutput, check_questions, fix_categories
 
 PROMPTS = Path(__file__).parent / "prompts"
 OCR_PROMPT = (PROMPTS / "OCR.md").read_text(encoding="utf-8")
 AI01_PROMPT = (PROMPTS / "AI-01.md").read_text(encoding="utf-8")
+AI02_PROMPT = (PROMPTS / "AI-02.md").read_text(encoding="utf-8")
 
 MAX_FILE_BYTES = 30 * 1024 * 1024
 DOWNLOAD_SECONDS = 30
@@ -25,6 +28,15 @@ AI01_SECONDS = 270  # API 명세의 서버 시간 상한
 AI01_ATTEMPTS = 2
 AI01_MIN_RETRY_SECONDS = 60  # 남은 시간이 이보다 적으면 단원화를 다시 하지 않는다
 AI01_MAX_OUTPUT = 16000
+
+# 요청만으로 미리 생성과 부족분을 구분할 수 없어, 둘 다 짧은 쪽(부족분 80초)에 맞춘다.
+# 미리 생성에서 다 못 만든 몫은 shortfall로 돌려주고, 백엔드가 커리큘럼 생성 때 다시 요청한다.
+AI02_SECONDS = 80
+AI02_ROUNDS = 3  # 첫 생성 + 부족분 재생성 2번
+AI02_MIN_ROUND_SECONDS = 20  # 남은 시간이 이보다 적으면 재생성하지 않는다
+AI02_EXTRA = 1.2  # 검증에서 버려질 몫을 생각해 더 요청한다
+AI02_CHUNK = 10  # 한 호출에서 만드는 최대 문제 수. 출력이 길수록 느려져 나눠서 동시에 부른다
+AI02_TOKENS_PER_QUESTION = 600
 
 OCR_SECONDS = 120  # 단원화에 쓸 시간을 남기기 위한 OCR 몫
 OCR_CONCURRENCY = 8
@@ -155,3 +167,74 @@ async def _categorize(pages, deadline, usage) -> list[dict]:
         if deadline.remaining() < AI01_MIN_RETRY_SECONDS:
             break
     raise error
+
+
+# ---------- AI-02 문제·해설 생성 ----------
+
+DIFFICULTY_NAMES = {1: "하", 2: "중", 3: "상"}
+
+
+async def generate_questions(req: GenerateQuestionsRequest, rng: random.Random | None = None) -> dict:
+    deadline = llm.Deadline(AI02_SECONDS)
+    usage = llm.Usage(model=llm.MODELS["AI02"])
+    pages = {p.page: p.text for p in req.category.pages}
+    document = "\n".join(f'<page n="{n}">\n{t}\n</page>' for n, t in pages.items())
+    rejected = {"schema": 0, "evidence": 0, "duplicate": 0}
+    rng = rng or random.Random()
+
+    results = await asyncio.gather(
+        *(_generate_spec(s, req, pages, document, deadline, usage, rejected, rng) for s in req.requests)
+    )
+    questions = [q for qs in results for q in qs]
+    if not questions:
+        raise AIError("LLM_FAILED")
+    shortfall = [
+        {"type": s.type, "difficulty": s.difficulty, "count": s.count - len(qs)}
+        for s, qs in zip(req.requests, results)
+        if len(qs) < s.count
+    ]
+    return {"questions": questions, "shortfall": shortfall, "rejected": rejected, "meta": usage.meta()}
+
+
+async def _generate_spec(spec: QuestionSpec, req, pages, document, deadline, usage, rejected, rng) -> list[dict]:
+    """유형·난이도 하나의 문제를 만든다. 검증에서 빠진 만큼만 다시 만든다."""
+    accepted: list[dict] = []
+    for _ in range(AI02_ROUNDS):
+        need = spec.count - len(accepted)
+        if need <= 0 or deadline.remaining() < AI02_MIN_ROUND_SECONDS:
+            break
+        exclude = req.exclude_stems + [q["stem"] for q in accepted]
+        ask = math.ceil(need * AI02_EXTRA)
+        chunks = [min(AI02_CHUNK, ask - i) for i in range(0, ask, AI02_CHUNK)]
+        outs = await asyncio.gather(
+            *(_ask_questions(spec, n, req.category.category_id, document, exclude, deadline, usage) for n in chunks),
+            return_exceptions=True,
+        )
+        drafts = [d for out in outs if not isinstance(out, BaseException) for d in out.questions]
+        for out in outs:
+            if isinstance(out, BaseException) and not isinstance(out, AIError):
+                raise out
+        new, counts = check_questions(drafts, spec.type, spec.difficulty, pages, exclude, rng)
+        for reason, n in counts.items():
+            rejected[reason] += n
+        accepted += new
+    return accepted[: spec.count]
+
+
+async def _ask_questions(spec: QuestionSpec, count: int, category_id: int, document: str, exclude, deadline, usage):
+    # 자료를 앞에 두어 같은 단원의 호출끼리 프롬프트 캐시를 나눠 쓴다.
+    existing = "\n".join(f"- {s}" for s in exclude[-60:]) or "(없음)"
+    request = (
+        f"유형: {spec.type}\n난이도: {spec.difficulty} ({DIFFICULTY_NAMES[spec.difficulty]})\n개수: {count}\n"
+        f"이미 있는 문제:\n{existing}"
+    )
+    return await llm.parse(
+        "AI02",
+        instructions=AI02_PROMPT,
+        input=f"<document>\n{document}\n</document>\n\n{request}",
+        schema=QUESTION_OUTPUTS[spec.type],
+        deadline=deadline,
+        usage=usage,
+        max_output_tokens=count * AI02_TOKENS_PER_QUESTION + 2000,
+        cache_key=f"category-{category_id}",
+    )
