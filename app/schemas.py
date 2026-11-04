@@ -167,3 +167,7 @@ class EssayOut(BaseModel):
 
 
 QUESTION_OUTPUTS: dict[str, type[BaseModel]] = {"OX": OXOut, "MC": MCOut, "SHORT": ShortOut, "ESSAY": EssayOut}
+
+
+class OcrText(BaseModel):
+    text: str
