@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app import pipelines
 from app.errors import ERRORS, AIError
 from app.schemas import (
     FeedbackRequest,
@@ -21,6 +22,8 @@ from app.schemas import (
 
 INTERNAL_KEY = os.environ["AI_INTERNAL_KEY"]
 FIXTURES = Path(__file__).parent.parent / "fixtures"
+# 기본은 mock이다. 실제 AI를 쓰려면 AI_MOCK=false. 아직 구현하지 않은 기능은 계속 mock 응답을 준다.
+MOCK = os.environ.get("AI_MOCK", "true").lower() != "false"
 
 
 def require_key(x_internal_key: str = Header(default="")):
@@ -38,7 +41,7 @@ def mock_error(x_mock_error: str | None = Header(default=None)) -> AIError | Non
 
 
 def raise_mock_error(error: AIError | None = Depends(mock_error)):
-    if error:
+    if error and MOCK:
         raise error
 
 
@@ -74,8 +77,10 @@ def health():
 
 
 @v1.post("/materials/process", dependencies=fails)
-def process_material(req: ProcessMaterialRequest):
-    return fixture("materials_process")
+async def process_material(req: ProcessMaterialRequest):
+    if MOCK:
+        return fixture("materials_process")
+    return await pipelines.process_material(req)
 
 
 @v1.post("/questions/generate", dependencies=fails)
@@ -103,6 +108,7 @@ def grade_essay(req: GradeEssayRequest):
 def tutor_ask(req: TutorAskRequest, error: AIError | None = Depends(mock_error)):
     data = fixture("tutor_ask")
     chunks = re.findall(r"\S+\s*", data["text"])
+    error = error if MOCK else None
 
     async def events():
         # 실제 스트림처럼 조금씩 보낸다. 에러를 시험할 때는 첫 조각 뒤에 끊는다.
