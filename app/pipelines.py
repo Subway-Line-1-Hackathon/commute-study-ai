@@ -2,7 +2,11 @@
 
 import asyncio
 import base64
+import math
+from collections import Counter
+from collections.abc import AsyncIterator
 import os
+import random
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -10,12 +14,28 @@ import httpx2
 
 from app import extract, llm
 from app.errors import AIError
-from app.schemas import CategoriesOut, OcrText, ProcessMaterialRequest
-from app.validate import InvalidOutput, fix_categories
+from app.schemas import (
+    QUESTION_OUTPUTS,
+    CategoriesOut,
+    FeedbackOut,
+    FeedbackRequest,
+    GenerateQuestionsRequest,
+    JudgeOut,
+    JudgeShortRequest,
+    OcrText,
+    ProcessMaterialRequest,
+    QuestionSpec,
+    TutorAskRequest,
+)
+from app.validate import InvalidOutput, check_questions, fix_categories, normalize
 
 PROMPTS = Path(__file__).parent / "prompts"
 OCR_PROMPT = (PROMPTS / "OCR.md").read_text(encoding="utf-8")
 AI01_PROMPT = (PROMPTS / "AI-01.md").read_text(encoding="utf-8")
+AI02_PROMPT = (PROMPTS / "AI-02.md").read_text(encoding="utf-8")
+AI03_PROMPT = (PROMPTS / "AI-03.md").read_text(encoding="utf-8")
+AI05_PROMPT = (PROMPTS / "AI-05.md").read_text(encoding="utf-8")
+AI06_PROMPT = (PROMPTS / "AI-06.md").read_text(encoding="utf-8")
 
 MAX_FILE_BYTES = 30 * 1024 * 1024
 DOWNLOAD_SECONDS = 30
@@ -25,6 +45,25 @@ AI01_SECONDS = 270  # API 명세의 서버 시간 상한
 AI01_ATTEMPTS = 2
 AI01_MIN_RETRY_SECONDS = 60  # 남은 시간이 이보다 적으면 단원화를 다시 하지 않는다
 AI01_MAX_OUTPUT = 16000
+
+# 추가 생성이 60초 이내여야 한다(기능명세서 5장). 요청만으로 사전 생성과 구분할 수 없어 둘 다 55초다.
+# 다 못 만든 몫은 shortfall로 돌려주고, 백엔드가 모자란 몫만 다시 요청한다.
+AI02_SECONDS = 55
+AI02_ROUNDS = 3  # 첫 생성 + 부족분 재생성 2번
+AI02_MIN_ROUND_SECONDS = 20  # 남은 시간이 이보다 적으면 재생성하지 않는다
+AI02_EXTRA = 1.2  # 검증에서 버려질 몫을 생각해 더 요청한다
+AI02_CHUNK = 10  # 한 호출에서 만드는 최대 문제 수. 출력이 길수록 느려져 나눠서 동시에 부른다
+AI02_TOKENS_PER_QUESTION = 600
+
+AI03_SECONDS = 4  # 사용자가 화면에서 기다린다. 실패하면 앱이 자가 판정으로 넘어가서 재시도하지 않는다
+AI03_MAX_ANSWER = 200
+AI05_SECONDS = 13  # 앱의 전체 10초 목표보다 길고 백엔드 타임아웃 15초보다 짧다
+AI05_MAX_TURN = 1000  # 이전 대화와 이번 질문을 이 글자 수에서 자른다
+AI05_MAX_OUTPUT = 600
+AI06_SECONDS = 13
+AI06_MAX_WRONG_ITEMS = 20
+AI06_MAX_STEM = 100
+AI06_TOP_CONCEPTS = 3
 
 OCR_SECONDS = 120  # 단원화에 쓸 시간을 남기기 위한 OCR 몫
 OCR_CONCURRENCY = 8
@@ -155,3 +194,165 @@ async def _categorize(pages, deadline, usage) -> list[dict]:
         if deadline.remaining() < AI01_MIN_RETRY_SECONDS:
             break
     raise error
+
+
+# ---------- AI-02 문제·해설 생성 ----------
+
+DIFFICULTY_NAMES = {1: "하", 2: "중", 3: "상"}
+
+
+async def generate_questions(req: GenerateQuestionsRequest, rng: random.Random | None = None) -> dict:
+    deadline = llm.Deadline(AI02_SECONDS)
+    usage = llm.Usage(model=llm.MODELS["AI02"])
+    pages = {p.page: p.text for p in req.category.pages}
+    document = "\n".join(f'<page n="{n}">\n{t}\n</page>' for n, t in pages.items())
+    rejected = {"schema": 0, "evidence": 0, "duplicate": 0}
+    rng = rng or random.Random()
+
+    results = await asyncio.gather(
+        *(_generate_spec(s, req, pages, document, deadline, usage, rejected, rng) for s in req.requests)
+    )
+    questions = [q for qs in results for q in qs]
+    if not questions:
+        raise AIError("LLM_FAILED")
+    shortfall = [
+        {"type": s.type, "difficulty": s.difficulty, "count": s.count - len(qs)}
+        for s, qs in zip(req.requests, results)
+        if len(qs) < s.count
+    ]
+    return {"questions": questions, "shortfall": shortfall, "rejected": rejected, "meta": usage.meta()}
+
+
+async def _generate_spec(spec: QuestionSpec, req, pages, document, deadline, usage, rejected, rng) -> list[dict]:
+    """유형·난이도 하나의 문제를 만든다. 검증에서 빠진 만큼만 다시 만든다."""
+    accepted: list[dict] = []
+    for _ in range(AI02_ROUNDS):
+        need = spec.count - len(accepted)
+        if need <= 0 or deadline.remaining() < AI02_MIN_ROUND_SECONDS:
+            break
+        exclude = req.exclude_stems + [q["stem"] for q in accepted]
+        ask = math.ceil(need * AI02_EXTRA)
+        chunks = [min(AI02_CHUNK, ask - i) for i in range(0, ask, AI02_CHUNK)]
+        outs = await asyncio.gather(
+            *(_ask_questions(spec, n, req.category.category_id, document, exclude, deadline, usage) for n in chunks),
+            return_exceptions=True,
+        )
+        drafts = [d for out in outs if not isinstance(out, BaseException) for d in out.questions]
+        for out in outs:
+            if isinstance(out, BaseException) and not isinstance(out, AIError):
+                raise out
+        new, counts = check_questions(drafts, spec.type, spec.difficulty, pages, exclude, rng)
+        for reason, n in counts.items():
+            rejected[reason] += n
+        accepted += new
+    return accepted[: spec.count]
+
+
+async def _ask_questions(spec: QuestionSpec, count: int, category_id: int, document: str, exclude, deadline, usage):
+    # 자료를 앞에 두어 같은 단원의 호출끼리 프롬프트 캐시를 나눠 쓴다.
+    existing = "\n".join(f"- {s}" for s in exclude[-60:]) or "(없음)"
+    request = (
+        f"유형: {spec.type}\n난이도: {spec.difficulty} ({DIFFICULTY_NAMES[spec.difficulty]})\n개수: {count}\n"
+        f"이미 있는 문제:\n{existing}"
+    )
+    return await llm.parse(
+        "AI02",
+        instructions=AI02_PROMPT,
+        input=f"<document>\n{document}\n</document>\n\n{request}",
+        schema=QUESTION_OUTPUTS[spec.type],
+        deadline=deadline,
+        usage=usage,
+        max_output_tokens=count * AI02_TOKENS_PER_QUESTION + 2000,
+        cache_key=f"category-{category_id}",
+    )
+
+
+# ---------- AI-03 단답형 판정 ----------
+
+
+async def judge_short(req: JudgeShortRequest) -> dict:
+    answer = req.user_answer.strip()
+    if not answer:
+        return {"correct": False, "reason": "답을 입력하지 않았어요."}
+    # 백엔드도 먼저 비교하지만, 정규화 기준이 달라도 AI를 부르지 않게 여기서 한 번 더 본다.
+    if normalize(answer) in {normalize(a) for a in req.accepted_answers}:
+        return {"correct": True, "reason": "정답과 같아요."}
+
+    accepted = ", ".join(req.accepted_answers)
+    out = await llm.parse(
+        "AI03",
+        instructions=AI03_PROMPT,
+        input=(
+            f"문제: {req.stem}\n정답 목록: {accepted}\n해설: {req.explanation}\n"
+            f"<user_answer>{answer[:AI03_MAX_ANSWER]}</user_answer>"
+        ),
+        schema=JudgeOut,
+        deadline=llm.Deadline(AI03_SECONDS),
+        usage=llm.Usage(model=llm.MODELS["AI03"]),
+        max_output_tokens=300,
+    )
+    return {"correct": out.correct, "reason": out.reason.strip()}
+
+
+# ---------- AI-05 AI 질문 ----------
+
+
+async def tutor_ask(req: TutorAskRequest, usage: llm.Usage) -> AsyncIterator[str]:
+    """답변 조각을 차례로 내준다. 실패는 AIError로 끝난다."""
+    q = req.question
+    document = "\n".join(f'<page n="{p.page}">\n{p.text}\n</page>' for p in req.category.pages)
+    choices = "".join(f"\n{i}. {c}" for i, c in enumerate(q.choices, 1))
+    question = (
+        f"<question>\n문제: {q.stem}{choices}\n정답: {q.answer}\n해설: {q.explanation}\n"
+        f"학생 답: {q.user_answer or '(답하지 않음)'}\n</question>"
+    )
+    # 단원 자료를 맨 앞에 둬서 같은 단원의 질문끼리 프롬프트 캐시를 나눠 쓴다.
+    messages = [{"role": "user", "content": f"단원: {req.category.name}\n<document>\n{document}\n</document>\n\n{question}"}]
+    messages += [{"role": t.role, "content": t.content[:AI05_MAX_TURN]} for t in req.history]
+    messages.append({"role": "user", "content": req.message[:AI05_MAX_TURN]})
+
+    async for delta in llm.stream(
+        "AI05",
+        instructions=AI05_PROMPT,
+        input=messages,
+        deadline=llm.Deadline(AI05_SECONDS),
+        usage=usage,
+        max_output_tokens=AI05_MAX_OUTPUT,
+        cache_key=f"category-{req.category.category_id}",
+    ):
+        yield delta
+
+
+# ---------- AI-06 통학 후 피드백 ----------
+
+
+async def session_feedback(req: FeedbackRequest) -> dict:
+    if req.answered == 0:
+        raise AIError("INVALID_REQUEST", "푼 문제가 없는 세션은 피드백을 만들지 않아요.")
+
+    # 개념 집계는 코드가 한다. LLM에는 집계 결과만 넘겨 없는 개념을 지어내지 않게 한다.
+    wrong = _top(tag for item in req.wrong_items for tag in item.concept_tags)
+    good = _top(c for c in req.correct_concepts if c not in wrong)
+    stems = "\n".join(f"- {item.stem[:AI06_MAX_STEM]}" for item in req.wrong_items[:AI06_MAX_WRONG_ITEMS])
+    summary = (
+        f"모드: {'복습' if req.mode == 'REVIEW' else '커리큘럼'}\n"
+        f"문제 {req.total}개 중 {req.answered}개를 풀고 {req.correct}개를 맞혔다.\n"
+        f"잘한 개념: {', '.join(good) or '(없음)'}\n"
+        f"헷갈린 개념: {', '.join(wrong) or '(없음)'}\n"
+        f"틀린 문제:\n{stems or '(없음)'}"
+    )
+    out = await llm.parse(
+        "AI06",
+        instructions=AI06_PROMPT,
+        input=summary,
+        schema=FeedbackOut,
+        deadline=llm.Deadline(AI06_SECONDS),
+        usage=llm.Usage(model=llm.MODELS["AI06"]),
+        max_output_tokens=400,
+    )
+    return {"feedback": out.feedback.strip()}
+
+
+def _top(items) -> list[str]:
+    """많이 나온 순서로 상위 몇 개. 같은 횟수면 먼저 나온 것이 앞이다."""
+    return [name for name, _ in Counter(i.strip() for i in items if i.strip()).most_common(AI06_TOP_CONCEPTS)]

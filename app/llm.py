@@ -3,9 +3,12 @@
 SDK 자동 재시도는 끈다. 재시도 횟수와 시간 상한은 각 기능이 API 명세대로 정한다.
 """
 
+import asyncio
 import logging
 import os
+import re
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
 import openai
@@ -29,6 +32,9 @@ _DEFAULTS = {
 }
 MODELS = {f: os.environ.get(f"MODEL_{f}", m) for f, (m, _) in _DEFAULTS.items()}
 EFFORTS = {f: os.environ.get(f"EFFORT_{f}", e) for f, (_, e) in _DEFAULTS.items()}
+
+RATE_LIMIT_WAITS = 3  # 분당 한도에 걸렸을 때 기다렸다 다시 보내는 최대 횟수
+MAX_RATE_LIMIT_WAIT = 30.0
 
 _client: AsyncOpenAI | None = None
 
@@ -83,8 +89,7 @@ async def parse[T: BaseModel](
     count_attempt: bool = True,
 ) -> T:
     """구조화 출력 호출 1회. 실패는 LLM_FAILED, 시간 초과는 LLM_TIMEOUT으로 바꾼다."""
-    timeout = deadline.remaining()
-    if timeout <= 0:
+    if deadline.remaining() <= 0:
         raise AIError("LLM_TIMEOUT")
     if count_attempt:
         usage.attempts += 1
@@ -92,23 +97,22 @@ async def parse[T: BaseModel](
     model = MODELS[feature]
     extra = {"prompt_cache_key": cache_key} if cache_key else {}
     started = time.monotonic()
-    try:
-        r = await client().responses.parse(
+    r = await _send(
+        feature,
+        model,
+        started,
+        deadline,
+        lambda: client().responses.parse(
             model=model,
             instructions=instructions,
             input=input,
             text_format=schema,
             reasoning={"effort": EFFORTS[feature]},
             max_output_tokens=max_output_tokens,
-            timeout=timeout,
+            timeout=deadline.remaining(),
             **extra,
-        )
-    except openai.APITimeoutError:
-        _log(feature, model, started, "LLM_TIMEOUT")
-        raise AIError("LLM_TIMEOUT") from None
-    except (openai.OpenAIError, ValueError) as e:  # ValueError: 잘린 JSON 등 파싱 실패
-        _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
-        raise AIError("LLM_FAILED") from None
+        ),
+    )
 
     if r.usage:
         usage.input_tokens += r.usage.input_tokens
@@ -119,6 +123,113 @@ async def parse[T: BaseModel](
         raise AIError("LLM_FAILED")
     _log(feature, model, started, "ok", r.usage)
     return r.output_parsed
+
+
+async def stream(
+    feature: str,
+    *,
+    instructions: str,
+    input: str | list,
+    deadline: Deadline,
+    usage: Usage,
+    max_output_tokens: int,
+    cache_key: str | None = None,
+) -> AsyncIterator[str]:
+    """스트리밍 호출 1회. 글자 조각을 내주고, 끝까지 받으면 usage에 토큰을 더한다.
+
+    중간 실패는 AIError로 바뀐다. 이미 내준 조각은 되돌릴 수 없으므로 재시도하지 않는다.
+    """
+    if deadline.remaining() <= 0:
+        raise AIError("LLM_TIMEOUT")
+    usage.attempts += 1
+    model = MODELS[feature]
+    extra = {"prompt_cache_key": cache_key} if cache_key else {}
+    started = time.monotonic()
+    events = await _send(
+        feature,
+        model,
+        started,
+        deadline,
+        lambda: client().responses.create(
+            model=model,
+            instructions=instructions,
+            input=input,
+            reasoning={"effort": EFFORTS[feature]},
+            max_output_tokens=max_output_tokens,
+            stream=True,
+            timeout=deadline.remaining(),
+            **extra,
+        ),
+    )
+    final = None
+    wrote = False
+    try:
+        async for e in events:
+            if e.type == "response.output_text.delta":
+                wrote = True
+                yield e.delta
+            elif e.type in ("response.completed", "response.incomplete", "response.failed"):
+                final = e.response
+            elif e.type == "error":
+                break
+            # ponytail: 마감은 조각이 올 때마다 확인한다. 조각 사이가 멈추면 SDK 타임아웃이 끊는다.
+            if deadline.remaining() <= 0:
+                _log(feature, model, started, "LLM_TIMEOUT")
+                raise AIError("LLM_TIMEOUT")
+    except openai.APITimeoutError:
+        _log(feature, model, started, "LLM_TIMEOUT")
+        raise AIError("LLM_TIMEOUT") from None
+    except openai.OpenAIError as e:
+        _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
+        raise AIError("LLM_FAILED") from None
+    finally:
+        await events.close()
+
+    u = final.usage if final else None
+    if u:
+        usage.input_tokens += u.input_tokens
+        usage.output_tokens += u.output_tokens
+    # incomplete는 출력 한도에서 잘린 답이고, 글자가 하나도 없으면 거절이다.
+    if final is None or final.status != "completed" or not wrote:
+        _log(feature, model, started, f"LLM_FAILED status={final.status if final else None}", u)
+        raise AIError("LLM_FAILED")
+    _log(feature, model, started, "ok", u)
+
+
+async def _send(feature: str, model: str, started: float, deadline: Deadline, request: Callable[[], Awaitable]):
+    """요청을 보낸다. 분당 한도에 걸리면 알려준 시간만큼 기다렸다 다시 보낸다."""
+    for waits in range(RATE_LIMIT_WAITS + 1):
+        try:
+            return await request()
+        except openai.RateLimitError as e:
+            # 요청 하나가 한도보다 크거나, 하루 한도처럼 몇십 분을 기다리라고 하면 기다려도 소용없다.
+            delay = _retry_after(e)
+            too_long = delay > MAX_RATE_LIMIT_WAIT or delay >= deadline.remaining()
+            if "Request too large" in str(e) or waits == RATE_LIMIT_WAITS or too_long:
+                _log(feature, model, started, "LLM_FAILED RateLimitError")
+                raise AIError("LLM_FAILED") from None
+            _log(feature, model, started, f"rate limited, wait {delay:.1f}s")
+            await asyncio.sleep(delay)
+        except openai.APITimeoutError:
+            _log(feature, model, started, "LLM_TIMEOUT")
+            raise AIError("LLM_TIMEOUT") from None
+        except (openai.OpenAIError, ValueError) as e:  # ValueError: 잘린 JSON 등 파싱 실패
+            _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
+            raise AIError("LLM_FAILED") from None
+
+
+def _retry_after(e: openai.RateLimitError) -> float:
+    """기다릴 초. 헤더가 없으면 메시지의 "try again in 6s" 같은 문구를 읽는다."""
+    headers = e.response.headers
+    if ms := headers.get("retry-after-ms"):
+        delay = float(ms) / 1000
+    elif sec := headers.get("retry-after"):
+        delay = float(sec)
+    elif m := re.search(r"try again in ([\d.]+)(ms|s)", str(e)):
+        delay = float(m[1]) / (1000 if m[2] == "ms" else 1)
+    else:
+        delay = 2.0
+    return delay + 0.2
 
 
 def _log(feature: str, model: str, started: float, result: str, u=None):

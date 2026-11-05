@@ -1,11 +1,22 @@
-# AI 서버 API 명세 v0.2
+# AI 서버 API 명세 v0.3
 
 백엔드가 호출하는 내부 API다. 합의 전 초안이다.
 
-- 기준: 기능명세서 5장 AI-01~06 (2026-11-03 저장본), 백엔드 초기 스키마 `V1__init_schema.sql` (`Feat/#3` 브랜치, `develop` 머지 전)
+- 기준: 기능명세서 5장 AI-01~06 (2026-11-05 저장본), 백엔드 초기 스키마 `V1__init_schema.sql` (`Feat/#3` 브랜치, `develop` 머지 전)
 - 기능정의서 (3)~(7)과 백엔드 개발 명세서를 아직 못 봐서 필드가 바뀔 수 있다.
 
-**v0.1에서 바뀐 것:** 백엔드 스키마에 이름과 값을 맞췄다. 단원은 `category`, 객관식은 `MC`, 난이도는 정수, 자료 형식은 `PPT`, ID는 숫자다. AI-01에 자료 종류 `kind`를 추가했다.
+**v0.2에서 바뀐 것 (기능명세서 11-05 수정본 반영):**
+
+| 항목 | v0.2 | v0.3 | 백엔드 영향 |
+| --- | --- | --- | --- |
+| AI-02 서버 시간 상한 | 80초 | 55초 (사전 생성·추가 생성 모두). 백엔드 타임아웃은 둘 다 60초 | 있음. 추가 생성이 60초 이내로 정해졌다. AI 서버 코드는 다음 구현 PR에서 바꾼다 |
+| AI-02 사전 생성 예시 | 중 난이도 30문제 | 40문제, O/X·객관식·단답 14·13·13 | 요청 내용만 바뀐다. 요청 형식은 같다 |
+| AI-02 사전 생성 부족분 | 커리큘럼 생성 때 다시 요청 | `PREPARING` 동안 바로 다시 요청 (제안, 10장) | 있음 |
+| AI-04 | P1 | P2. 구현하지 않고 mock 응답만 유지 | 호출하지 않으면 된다 |
+| AI-05 | - | 새 문제·유사 문제를 만들어 달라는 요청에는 응하지 않는다 | 없음 |
+| AI-01 `summary` | `- ` 줄 목록 (일반 문장) | 마크다운 `- **개념**: 설명 (N쪽)`. 모든 AI 문장에서 꾸밈말·이모지 금지 | 프론트엔드가 마크다운으로 그리고, TTS로 읽을 때 기호를 뺀다 |
+
+v0.1에서는 백엔드 스키마에 이름과 값을 맞췄다. 단원은 `category`, 객관식은 `MC`, 난이도는 정수, 자료 형식은 `PPT`, ID는 숫자다.
 
 ## 1. 공통 규칙
 
@@ -24,11 +35,13 @@
 | --- | --- | --- | --- | --- | --- |
 | - | `GET /health` | 배포 확인 | - | - | 5 |
 | AI-01 | `POST /v1/materials/process` | 자료 `PROCESSING` 진입 시 (M2, M5) | 2회 | 270 | 300 |
-| AI-02 | `POST /v1/questions/generate` | `READY` 후 단원별 1회, 커리큘럼 생성 시 부족분 | 생성 1회 + 재생성 최대 2회 | 270, 부족분은 80 | 300, 부족분은 90 |
+| AI-02 | `POST /v1/questions/generate` | `READY` 후 단원별 사전 생성 1회, 재출제할 문제가 부족할 때 추가 생성 | 생성 1회 + 재생성 최대 2회 | 55 | 60 |
 | AI-03 | `POST /v1/answers/judge-short` | 단답이 정답 목록과 다를 때 | 1회 | 4 | 5 |
-| AI-04 | `POST /v1/answers/grade-essay` (P1) | 논술 답안 제출 시, 실패한 답안은 세션 종료 때 | 1회 | 18 | 20 |
+| AI-04 | `POST /v1/answers/grade-essay` (P2) | 구현하지 않음. mock 응답만 있다 | - | - | - |
 | AI-05 | `POST /v1/tutor/ask` (SSE) | AI 질문 버튼·입력 시 | 1회 | 13 | 15 |
 | AI-06 | `POST /v1/sessions/feedback` | 세션 종료 직후 | 1회 | 13 | 15 |
+
+AI-02는 추가 생성이 60초 이내여야 해서(기능명세서 5장) 서버 시간 상한을 55초로 둔다. 요청 하나로 사전 생성과 추가 생성을 구분하지 않으므로 사전 생성도 55초다. 55초 안에 다 못 만든 몫은 `shortfall`로 돌아온다. 백엔드가 한 번 호출하면 AI 서버가 안에서 10문제씩 나눠 동시에 만든다.
 
 서버 시간 상한은 백엔드 타임아웃보다 짧다. 그래야 백엔드가 연결을 끊기 전에 AI 서버가 에러나 부분 결과를 돌려줄 수 있다. 시간 상한에 닿으면 남은 재시도를 하지 않는다.
 
@@ -45,13 +58,13 @@
 | 400 | `INVALID_REQUEST` | 요청 형식 오류 | 호출 코드 수정 |
 | 401 | `UNAUTHORIZED` | 내부 키 오류 | 환경변수 확인 |
 | 422 | `UNSUPPORTED_FILE` | 열 수 없거나 지원하지 않는 파일 (구버전 .ppt 포함) | `FAILED`, 재시도 무의미 |
-| 422 | `PAGE_LIMIT_EXCEEDED` | PDF·PPT 100쪽, PNG 20장 초과 | `FAILED` (용량 초과) |
+| 422 | `PAGE_LIMIT_EXCEEDED` | PDF·PPT 100쪽, PNG 20장 초과 | `FAILED`. 기능명세서는 용량 초과를 업로드 단계에서 거부하므로 확인 필요 (10장) |
 | 422 | `TEXT_EXTRACTION_FAILED` | 텍스트 인식 실패 | `FAILED`, 재시도 무의미 |
 | 502 | `FILE_FETCH_FAILED` | 파일 URL 다운로드 실패 | 서명 URL을 새로 만들어 재시도 가능 |
 | 502 | `LLM_FAILED` | AI 응답 오류. 호출 목록의 시도 횟수를 다 쓴 뒤 반환 | 기능별 실패 처리 |
 | 504 | `LLM_TIMEOUT` | 서버 시간 상한 초과 | 기능별 실패 처리 |
 
-파일 크기 30MB 초과는 M1대로 백엔드가 업로드 단계에서 거부한다. 쪽수는 파일을 열어야 알 수 있어서 AI 서버가 판단한다.
+파일 크기 30MB 초과와 PNG 20장 초과는 M1대로 백엔드가 업로드 단계에서 거부한다. PDF·PPT 쪽수는 파일을 열어야 알 수 있다. 백엔드가 업로드 때 확인하지 않으면 AI 서버가 `PAGE_LIMIT_EXCEEDED`로 돌려준다. AI 서버는 어느 쪽이든 쪽수를 다시 확인한다.
 
 ### 공통 타입
 
@@ -105,7 +118,7 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
       "name": "스택과 큐",
       "pageStart": 1,
       "pageEnd": 2,
-      "summary": "스택은 LIFO, 큐는 FIFO 구조다. ..."
+      "summary": "- **스택(Stack)**: 나중에 넣은 데이터가 먼저 나오는 LIFO 구조다. (1쪽)\n- **큐(Queue)**: 먼저 넣은 데이터가 먼저 나오는 FIFO 구조다. (2쪽)"
     }
   ],
   "meta": { "model": "gpt-6.1-terra", "inputTokens": 35000, "outputTokens": 3200, "elapsedMs": 62000, "attempts": 1 }
@@ -116,10 +129,12 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 | --- | --- |
 | `pageCount` | `material.page_count` |
 | `categories` | `category` |
-| `pages` | 스키마에 없음 (9장 1번). AI-02와 AI-05가 다시 입력으로 쓴다 |
+| `pages` | 스키마에 없음 (9장 1번). AI-02와 AI-05가 다시 입력으로 쓴다. 원본 파일이 아니므로 `EXPIRED` 뒤에도 남겨야 AI 질문이 동작한다 |
 | 에러 `message` | `material.error_message` |
 
 `categories`는 1쪽부터 마지막 쪽까지 빠짐없이, 겹치지 않게 이어진다. AI 서버가 검증한 뒤 반환한다.
+
+`summary`는 마크다운이다. `- **개념**: 설명 (N쪽)` 형식의 목록 줄로만 이루어진다. 앱은 마크다운으로 그리고, TTS로 읽을 때는 `-`, `**` 기호를 빼고 읽는다. 문제 지문·보기·해설과 AI-03·06 문장은 마크다운이 없는 일반 문장이다.
 
 **상태 전이**
 
@@ -129,6 +144,8 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 | `UNSUPPORTED_FILE`, `PAGE_LIMIT_EXCEEDED`, `TEXT_EXTRACTION_FAILED`, `LLM_FAILED`, `LLM_TIMEOUT` | M4 `PROCESSING` → `FAILED`, `message`를 실패 사유로 표시 |
 | `FILE_FETCH_FAILED` | 서명 URL을 새로 만들어 1회 다시 호출, 또 실패하면 M4 |
 | 사용자 재시도 | M5 같은 파일로 1회 다시 호출 |
+
+원본 파일이 만료되면(M6 `EXPIRED`) AI-01을 다시 호출할 수 없다. 단원·요약본은 이미 저장돼 있어 영향이 없다.
 
 ---
 
@@ -147,9 +164,9 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
     ]
   },
   "requests": [
-    { "type": "OX", "difficulty": 2, "count": 10 },
-    { "type": "MC", "difficulty": 2, "count": 15 },
-    { "type": "SHORT", "difficulty": 2, "count": 5 }
+    { "type": "OX", "difficulty": 2, "count": 14 },
+    { "type": "MC", "difficulty": 2, "count": 13 },
+    { "type": "SHORT", "difficulty": 2, "count": 13 }
   ],
   "excludeStems": ["스택의 입출력 방식은?"]
 }
@@ -157,7 +174,9 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 
 - `excludeStems`: 이미 있는 문제의 지문. 같은 문제를 다시 만들지 않기 위해 보낸다.
 - `requests`의 `count` 합계는 40 이하다. 넘으면 `INVALID_REQUEST`다.
-- 단원화 직후 미리 생성은 위 예시처럼 중 난이도 30문제를 요청한다. 상·하 난이도와 부족분은 커리큘럼 생성 때 필요한 만큼 요청한다.
+- 사전 생성은 위 예시처럼 40문제를 O/X·객관식·단답 균등(14·13·13)으로 한 번에 요청한다 (기능명세서 4-2). 난이도 구성은 아직 정해지지 않았다 (10장). 유형·난이도 조합마다 `requests` 항목을 나누면 된다.
+- 추가 생성은 이미 있는 문제의 지문을 `excludeStems`에 모두 넣고, 필요한 유형만 균등하게 요청한다.
+- 논술(`ESSAY`)은 P2라 요청하지 않는다. 형식은 남겨 둔다.
 
 **응답 200**
 
@@ -182,7 +201,7 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
     { "type": "SHORT", "difficulty": 2, "count": 1 }
   ],
   "rejected": { "schema": 1, "evidence": 2, "duplicate": 0 },
-  "meta": { "model": "gpt-6.1-terra", "inputTokens": 5000, "outputTokens": 9000, "elapsedMs": 95000, "attempts": 2 }
+  "meta": { "model": "gpt-6.1-terra", "inputTokens": 5000, "outputTokens": 9000, "elapsedMs": 40000, "attempts": 2 }
 }
 ```
 
@@ -204,12 +223,12 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 
 | 시점 | 백엔드 처리 |
 | --- | --- |
-| 미리 생성 실패 | 자료는 `READY`로 둔다. 단원 문제 상태만 실패로 표시하고, 다음 커리큘럼 생성 때 부족분으로 다시 호출한다 |
-| 부족분 실패 또는 `shortfall` | 있는 문제로만 커리큘럼을 만든다 |
-| 부족분 실패이고 문제가 0개 | 커리큘럼을 만들지 않고 실패를 안내한다. 사용자가 다시 시도할 수 있다 |
+| 사전 생성에서 `shortfall` 또는 실패 | 단원은 `PREPARING`으로 두고 모자란 몫만 바로 다시 요청한다. 2번 더 해도 모자랄 때의 처리는 정해지지 않았다 (10장) |
+| 추가 생성에서 `shortfall` | 있는 문제로만 커리큘럼을 만든다 |
+| 추가 생성 실패이고 쓸 문제가 0개 | 커리큘럼을 만들지 않고 실패를 안내한다. 사용자가 다시 시도할 수 있다 |
 
-- 미리 생성이 진행 중인 단원은 부족분을 호출하지 않는다. 같은 문제를 중복으로 만들게 된다.
-- 단원·난이도별 문제가 60개면 더 생성하지 않고 이미 나온 문제를 다시 낸다. 이 상한은 백엔드가 확인한다.
+- `PREPARING`인 단원은 선택할 수 없으므로 추가 생성이 겹치지 않는다.
+- 자료가 `EXPIRED`이면 추가 생성을 하지 않는다 (기능명세서 M6). AI 서버는 원본 파일 대신 `pages`를 쓰므로 기술적으로는 가능하지만, 기획 결정을 따른다.
 
 ---
 
@@ -238,7 +257,9 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 
 ---
 
-## 5. AI-04 논술형 채점 (P1)
+## 5. AI-04 논술형 채점 (P2)
+
+기능명세서에서 P2(3주 범위 밖)로 바뀌어 구현하지 않는다. 아래 형식의 mock 응답만 남겨 둔다.
 
 `POST /v1/answers/grade-essay`
 
@@ -267,8 +288,7 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 ```
 
 - `score`는 충족한 핵심 포인트의 비율이고 `attempt.score`에 저장한다. `correct`는 `score`가 0.6 이상이면 `true`다.
-- 실패하면 "나중에 확인"으로 저장하고, 세션 종료 때 백엔드가 1회 다시 호출한다. 또 실패하면 채점 대기로 둔다.
-- 채점 대기는 `attempt.correct`를 null로 둔다. 정답률에서 제외하고 AI-06의 `answered`, `correct`에도 넣지 않는다.
+- 구현하게 되면 실패한 답안은 "나중에 확인"으로 저장한다 (기능명세서 5장).
 
 ---
 
@@ -319,6 +339,8 @@ data: {"meta":{"model":"...","inputTokens":5000,"outputTokens":120,"elapsedMs":3
 - 사용자당 진행 중인 질문은 1개로 제한한다. 그래야 동시 요청으로 20회를 넘지 않고, `done`을 못 받은 호출이 겹쳐 쌓이지 않는다.
 - `delta` 뒤에 `error`가 오면 앱은 나온 내용을 남기고 다시 시도 버튼을 표시한다.
 - 답변은 단원 자료를 기준으로 하고, 자료에 없는 내용은 없다고 밝힌다.
+- 새 문제나 유사 문제를 만들어 달라는 요청에는 응하지 않고 개념 설명으로 돌린다 (기능명세서 4-4).
+- 자료가 `EXPIRED`여도 `category.pages`를 보내면 동작한다.
 
 ---
 
@@ -340,7 +362,8 @@ data: {"meta":{"model":"...","inputTokens":5000,"outputTokens":120,"elapsedMs":3
 }
 ```
 
-- 호출 시점은 세션이 `COMPLETED` 또는 `ENDED`가 된 직후다. `answered`가 0이거나 S6 '새로 시작'으로 끝난 세션은 호출하지 않는다. 사용자가 S-50을 보지 않기 때문이다.
+- 호출 시점은 세션이 `COMPLETED` 또는 `ENDED`가 된 직후다. `answered`가 0이거나 S6 '새로 시작'으로 끝난 세션은 호출하지 않는다. 사용자가 S-50을 보지 않기 때문이다. S7 자정 자동 종료도 같은 이유로 호출하지 않는 것을 제안한다 (10장). `answered`가 0이면 AI 서버는 `400 INVALID_REQUEST`를 돌려준다.
+- 세션은 최대 30문제라 `wrongItems`도 30개 이하다. AI 서버는 앞의 20개만 쓴다.
 - `correctConcepts`, `wrongItems[].conceptTags`는 문제의 개념 태그에서 모은다 (9장 3번).
 
 **응답 200**
@@ -358,8 +381,10 @@ data: {"meta":{"model":"...","inputTokens":5000,"outputTokens":120,"elapsedMs":3
 | 기능 | 이유 |
 | --- | --- |
 | 커리큘럼 구성 (CR-03) | 문제은행에서 고르는 작업이라 AI 호출이 필요 없다. 부족할 때만 AI-02를 호출한다 |
-| 복습 퀴즈 | 푼 문제에서 고르므로 AI 호출이 없다 |
-| 유사 문제, 오답 분석 | 기획에서 보류 |
+| 복습 커리큘럼 (CR-04) | 푼 문제에서 고르므로 AI 호출이 없다 |
+| 유사 문제 | 기획에서 구현하지 않기로 했다 |
+| 오답 분석 | P2 |
+| 듣기 (LN-08) | 기기 내장 TTS라 AI 호출이 없다. 요약본·문제·해설은 소리 내어 읽기 좋은 문장으로 만든다 |
 | 족보로 문제 만들기 | 스키마에 `PAST_EXAM`이 있지만 활용 방식이 정해지지 않았다. 지금은 AI-01이 `kind`만 받는다 |
 
 ---
@@ -371,24 +396,36 @@ data: {"meta":{"model":"...","inputTokens":5000,"outputTokens":120,"elapsedMs":3
 | # | 차이 | 제안 |
 | --- | --- | --- |
 | 1 | AI-01 쪽 텍스트(`pages`)를 저장할 곳이 없다 | `material_page(material_id, page, text)` 테이블 |
-| 2 | 단원별 문제 생성 상태가 없다 | `category`에 문제 상태 컬럼 (생성 중, 완료, 실패) |
+| 2 | 단원별 문제 생성 상태가 없다 | `category`에 문제 상태 컬럼. 값은 기능명세서 3-1의 `PREPARING`, `AVAILABLE` |
 | 3 | 개념 태그 컬럼이 없다 | `question.concept_tags jsonb`. AI-06 피드백에 쓴다 |
-| 4 | `rubric`이 `text`다 | `jsonb`. `accepted_answers`와 같은 목록 형식 |
+| 4 | `rubric`이 `text`다 | 논술이 P2라 급하지 않다. 바꾼다면 `jsonb` |
 | 5 | 자가 판정 여부를 저장할 곳이 없다 | `attempt.self_judged boolean` |
 | 6 | `difficulty` 값의 의미가 정해지지 않았다 | 1 하, 2 중, 3 상 |
-| 7 | `ai_question_usage`가 P1로 표시돼 있다 | 기능명세서 4-4는 AI 질문 횟수 제한을 결정 사항으로 둔다. P0인지 확인 |
+| 7 | `ai_question_usage`가 P1로 표시돼 있다 | 기능명세서 4-4에서 하루 20회가 P0로 정해졌다. 스키마 주석을 P0로 |
 | 8 | 지원 형식 `PPT` | 업로드 단계에서 .pptx만 받는다 |
+| 9 | 자료 상태에 `EXPIRED`가 생겼다 | `material_status`에 추가. 원본 파일만 지우고 1번 쪽 텍스트는 남긴다 |
 
-## 10. 기능명세서에 아직 없는 것
+## 10. 팀 합의가 필요한 것
 
-기능명세서 5장의 빈도·실패 시는 원래 문구 그대로다. 아래는 이 명세에만 있어서 팀 합의가 필요하다.
+### 기능명세서에 아직 없는 제안
+
+11-05 수정본에서 AI 질문 하루 20회와 사전 생성 단원 상태가 반영됐다. 나머지 빈도·실패 시 수정안은 아직 반영되지 않았다.
 
 | 기능 | 이 명세의 제안 |
 | --- | --- |
 | 공통 | 기능별 시도 횟수와 서버 시간 상한 (1장 호출 목록) |
 | AI-01 | 텍스트 인식 실패·파일 오류·쪽수 초과는 재시도 없이 `FAILED` |
-| AI-02 | 단원·난이도별 60문제 상한, 전체 실패 시 처리 |
+| AI-02 | 사전 생성이 모자라면 `PREPARING` 동안 모자란 몫만 바로 2번까지 다시 요청 |
+| AI-02 | 단원·난이도별 60문제 상한. 추가 생성이 끝없이 늘지 않게 막는다 |
 | AI-03 | 자가 판정을 정답률에 포함 |
-| AI-04 | 세션 종료 때 1회 재채점 |
-| AI-05 | 하루 20회 (기능명세서는 N회), 한국 시간 자정 초기화, 동시 1개 |
-| AI-06 | 푼 문제가 0개이거나 '새로 시작'으로 끝난 세션은 호출하지 않음 |
+| AI-05 | 한국 시간 자정 초기화, 사용자당 동시 1개 |
+| AI-06 | 푼 문제가 0개이거나 '새로 시작'(S6)·자정 자동 종료(S7)로 끝난 세션은 호출하지 않음 |
+
+### 기능명세서에서 정해지지 않은 것
+
+| 질문 | 대상 | 영향 |
+| --- | --- | --- |
+| 사전 생성 40문제의 난이도 구성 (모두 중인지, 하·중·상을 섞는지) | 기획 | 사용자가 고른 난이도의 문제가 없으면 매번 추가 생성(대기 화면)이 생긴다 |
+| 사전 생성을 다시 요청해도 40문제가 안 되면 `AVAILABLE`로 둘지 | 기획·백엔드 | 진도 = 푼 문제 ÷ 40 계산 |
+| PDF·PPT 쪽수 초과를 업로드 단계에서 거부할지, AI 서버 응답으로 `FAILED` 처리할지 | 백엔드 | 3-1은 용량 초과를 업로드 단계에서 거부한다. 쪽수를 세려면 백엔드가 파일을 열어야 한다 |
+| `EXPIRED` 뒤에도 쪽 텍스트(9장 1번)를 남기는지 | 백엔드 | 지우면 만료된 자료의 AI 질문이 동작하지 않는다 |
