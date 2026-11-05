@@ -10,7 +10,8 @@
 | AI-02 문제·해설 생성 | 구현 (`AI_MOCK=false`일 때) |
 | AI-03 단답형 판정 | 구현 (`AI_MOCK=false`일 때) |
 | AI-06 통학 후 피드백 | 구현 (`AI_MOCK=false`일 때) |
-| AI-04, AI-05 | mock |
+| AI-05 AI 질문 | mock |
+| AI-04 논술형 채점 | P2라 구현하지 않음. mock만 유지 |
 
 | 환경변수 | 설명 |
 | --- | --- |
