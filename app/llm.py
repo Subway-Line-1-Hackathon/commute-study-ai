@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
 import openai
@@ -96,23 +97,114 @@ async def parse[T: BaseModel](
     model = MODELS[feature]
     extra = {"prompt_cache_key": cache_key} if cache_key else {}
     started = time.monotonic()
+    r = await _send(
+        feature,
+        model,
+        started,
+        deadline,
+        lambda: client().responses.parse(
+            model=model,
+            instructions=instructions,
+            input=input,
+            text_format=schema,
+            reasoning={"effort": EFFORTS[feature]},
+            max_output_tokens=max_output_tokens,
+            timeout=deadline.remaining(),
+            **extra,
+        ),
+    )
+
+    if r.usage:
+        usage.input_tokens += r.usage.input_tokens
+        usage.output_tokens += r.usage.output_tokens
+    # incomplete는 출력 한도 초과, output_parsed가 없으면 거절(refusal)이다.
+    if r.status != "completed" or r.output_parsed is None:
+        _log(feature, model, started, f"LLM_FAILED status={r.status}", r.usage)
+        raise AIError("LLM_FAILED")
+    _log(feature, model, started, "ok", r.usage)
+    return r.output_parsed
+
+
+async def stream(
+    feature: str,
+    *,
+    instructions: str,
+    input: str | list,
+    deadline: Deadline,
+    usage: Usage,
+    max_output_tokens: int,
+    cache_key: str | None = None,
+) -> AsyncIterator[str]:
+    """스트리밍 호출 1회. 글자 조각을 내주고, 끝까지 받으면 usage에 토큰을 더한다.
+
+    중간 실패는 AIError로 바뀐다. 이미 내준 조각은 되돌릴 수 없으므로 재시도하지 않는다.
+    """
+    if deadline.remaining() <= 0:
+        raise AIError("LLM_TIMEOUT")
+    usage.attempts += 1
+    model = MODELS[feature]
+    extra = {"prompt_cache_key": cache_key} if cache_key else {}
+    started = time.monotonic()
+    events = await _send(
+        feature,
+        model,
+        started,
+        deadline,
+        lambda: client().responses.create(
+            model=model,
+            instructions=instructions,
+            input=input,
+            reasoning={"effort": EFFORTS[feature]},
+            max_output_tokens=max_output_tokens,
+            stream=True,
+            timeout=deadline.remaining(),
+            **extra,
+        ),
+    )
+    final = None
+    wrote = False
+    try:
+        async for e in events:
+            if e.type == "response.output_text.delta":
+                wrote = True
+                yield e.delta
+            elif e.type in ("response.completed", "response.incomplete", "response.failed"):
+                final = e.response
+            elif e.type == "error":
+                break
+            # ponytail: 마감은 조각이 올 때마다 확인한다. 조각 사이가 멈추면 SDK 타임아웃이 끊는다.
+            if deadline.remaining() <= 0:
+                _log(feature, model, started, "LLM_TIMEOUT")
+                raise AIError("LLM_TIMEOUT")
+    except openai.APITimeoutError:
+        _log(feature, model, started, "LLM_TIMEOUT")
+        raise AIError("LLM_TIMEOUT") from None
+    except openai.OpenAIError as e:
+        _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
+        raise AIError("LLM_FAILED") from None
+    finally:
+        await events.close()
+
+    u = final.usage if final else None
+    if u:
+        usage.input_tokens += u.input_tokens
+        usage.output_tokens += u.output_tokens
+    # incomplete는 출력 한도에서 잘린 답이고, 글자가 하나도 없으면 거절이다.
+    if final is None or final.status != "completed" or not wrote:
+        _log(feature, model, started, f"LLM_FAILED status={final.status if final else None}", u)
+        raise AIError("LLM_FAILED")
+    _log(feature, model, started, "ok", u)
+
+
+async def _send(feature: str, model: str, started: float, deadline: Deadline, request: Callable[[], Awaitable]):
+    """요청을 보낸다. 분당 한도에 걸리면 알려준 시간만큼 기다렸다 다시 보낸다."""
     for waits in range(RATE_LIMIT_WAITS + 1):
         try:
-            r = await client().responses.parse(
-                model=model,
-                instructions=instructions,
-                input=input,
-                text_format=schema,
-                reasoning={"effort": EFFORTS[feature]},
-                max_output_tokens=max_output_tokens,
-                timeout=deadline.remaining(),
-                **extra,
-            )
-            break
+            return await request()
         except openai.RateLimitError as e:
-            # 분당 한도에 걸리면 알려준 시간만큼 기다린다. 요청 하나가 한도보다 크면 기다려도 소용없다.
+            # 요청 하나가 한도보다 크거나, 하루 한도처럼 몇십 분을 기다리라고 하면 기다려도 소용없다.
             delay = _retry_after(e)
-            too_long = delay > MAX_RATE_LIMIT_WAIT or delay >= deadline.remaining()  # 하루 한도는 몇십 분을 기다리라고 한다
+            too_long = delay > MAX_RATE_LIMIT_WAIT or delay >= deadline.remaining()
             if "Request too large" in str(e) or waits == RATE_LIMIT_WAITS or too_long:
                 _log(feature, model, started, "LLM_FAILED RateLimitError")
                 raise AIError("LLM_FAILED") from None
@@ -124,16 +216,6 @@ async def parse[T: BaseModel](
         except (openai.OpenAIError, ValueError) as e:  # ValueError: 잘린 JSON 등 파싱 실패
             _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
             raise AIError("LLM_FAILED") from None
-
-    if r.usage:
-        usage.input_tokens += r.usage.input_tokens
-        usage.output_tokens += r.usage.output_tokens
-    # incomplete는 출력 한도 초과, output_parsed가 없으면 거절(refusal)이다.
-    if r.status != "completed" or r.output_parsed is None:
-        _log(feature, model, started, f"LLM_FAILED status={r.status}", r.usage)
-        raise AIError("LLM_FAILED")
-    _log(feature, model, started, "ok", r.usage)
-    return r.output_parsed
 
 
 def _retry_after(e: openai.RateLimitError) -> float:

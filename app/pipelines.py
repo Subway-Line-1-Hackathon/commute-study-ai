@@ -4,6 +4,7 @@ import asyncio
 import base64
 import math
 from collections import Counter
+from collections.abc import AsyncIterator
 import os
 import random
 from pathlib import Path
@@ -24,6 +25,7 @@ from app.schemas import (
     OcrText,
     ProcessMaterialRequest,
     QuestionSpec,
+    TutorAskRequest,
 )
 from app.validate import InvalidOutput, check_questions, fix_categories, normalize
 
@@ -32,6 +34,7 @@ OCR_PROMPT = (PROMPTS / "OCR.md").read_text(encoding="utf-8")
 AI01_PROMPT = (PROMPTS / "AI-01.md").read_text(encoding="utf-8")
 AI02_PROMPT = (PROMPTS / "AI-02.md").read_text(encoding="utf-8")
 AI03_PROMPT = (PROMPTS / "AI-03.md").read_text(encoding="utf-8")
+AI05_PROMPT = (PROMPTS / "AI-05.md").read_text(encoding="utf-8")
 AI06_PROMPT = (PROMPTS / "AI-06.md").read_text(encoding="utf-8")
 
 MAX_FILE_BYTES = 30 * 1024 * 1024
@@ -54,6 +57,9 @@ AI02_TOKENS_PER_QUESTION = 600
 
 AI03_SECONDS = 4  # 사용자가 화면에서 기다린다. 실패하면 앱이 자가 판정으로 넘어가서 재시도하지 않는다
 AI03_MAX_ANSWER = 200
+AI05_SECONDS = 13  # 앱의 전체 10초 목표보다 길고 백엔드 타임아웃 15초보다 짧다
+AI05_MAX_TURN = 1000  # 이전 대화와 이번 질문을 이 글자 수에서 자른다
+AI05_MAX_OUTPUT = 600
 AI06_SECONDS = 13
 AI06_MAX_WRONG_ITEMS = 20
 AI06_MAX_STEM = 100
@@ -286,6 +292,35 @@ async def judge_short(req: JudgeShortRequest) -> dict:
         max_output_tokens=300,
     )
     return {"correct": out.correct, "reason": out.reason.strip()}
+
+
+# ---------- AI-05 AI 질문 ----------
+
+
+async def tutor_ask(req: TutorAskRequest, usage: llm.Usage) -> AsyncIterator[str]:
+    """답변 조각을 차례로 내준다. 실패는 AIError로 끝난다."""
+    q = req.question
+    document = "\n".join(f'<page n="{p.page}">\n{p.text}\n</page>' for p in req.category.pages)
+    choices = "".join(f"\n{i}. {c}" for i, c in enumerate(q.choices, 1))
+    question = (
+        f"<question>\n문제: {q.stem}{choices}\n정답: {q.answer}\n해설: {q.explanation}\n"
+        f"학생 답: {q.user_answer or '(답하지 않음)'}\n</question>"
+    )
+    # 단원 자료를 맨 앞에 둬서 같은 단원의 질문끼리 프롬프트 캐시를 나눠 쓴다.
+    messages = [{"role": "user", "content": f"단원: {req.category.name}\n<document>\n{document}\n</document>\n\n{question}"}]
+    messages += [{"role": t.role, "content": t.content[:AI05_MAX_TURN]} for t in req.history]
+    messages.append({"role": "user", "content": req.message[:AI05_MAX_TURN]})
+
+    async for delta in llm.stream(
+        "AI05",
+        instructions=AI05_PROMPT,
+        input=messages,
+        deadline=llm.Deadline(AI05_SECONDS),
+        usage=usage,
+        max_output_tokens=AI05_MAX_OUTPUT,
+        cache_key=f"category-{req.category.category_id}",
+    ):
+        yield delta
 
 
 # ---------- AI-06 통학 후 피드백 ----------
