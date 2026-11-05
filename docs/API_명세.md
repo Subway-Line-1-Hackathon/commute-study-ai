@@ -14,6 +14,7 @@
 | AI-02 사전 생성 부족분 | 커리큘럼 생성 때 다시 요청 | `PREPARING` 동안 바로 다시 요청 (제안, 10장) | 있음 |
 | AI-04 | P1 | P2. 구현하지 않고 mock 응답만 유지 | 호출하지 않으면 된다 |
 | AI-05 | - | 새 문제·유사 문제를 만들어 달라는 요청에는 응하지 않는다 | 없음 |
+| AI-01 `summary` | `- ` 줄 목록 (일반 문장) | 마크다운 `- **개념**: 설명 (N쪽)`. 모든 AI 문장에서 꾸밈말·이모지 금지 | 프론트엔드가 마크다운으로 그리고, TTS로 읽을 때 기호를 뺀다 |
 
 v0.1에서는 백엔드 스키마에 이름과 값을 맞췄다. 단원은 `category`, 객관식은 `MC`, 난이도는 정수, 자료 형식은 `PPT`, ID는 숫자다.
 
@@ -117,7 +118,7 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
       "name": "스택과 큐",
       "pageStart": 1,
       "pageEnd": 2,
-      "summary": "스택은 LIFO, 큐는 FIFO 구조다. ..."
+      "summary": "- **스택(Stack)**: 나중에 넣은 데이터가 먼저 나오는 LIFO 구조다. (1쪽)\n- **큐(Queue)**: 먼저 넣은 데이터가 먼저 나오는 FIFO 구조다. (2쪽)"
     }
   ],
   "meta": { "model": "gpt-6.1-terra", "inputTokens": 35000, "outputTokens": 3200, "elapsedMs": 62000, "attempts": 1 }
@@ -132,6 +133,8 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 | 에러 `message` | `material.error_message` |
 
 `categories`는 1쪽부터 마지막 쪽까지 빠짐없이, 겹치지 않게 이어진다. AI 서버가 검증한 뒤 반환한다.
+
+`summary`는 마크다운이다. `- **개념**: 설명 (N쪽)` 형식의 목록 줄로만 이루어진다. 앱은 마크다운으로 그리고, TTS로 읽을 때는 `-`, `**` 기호를 빼고 읽는다. 문제 지문·보기·해설과 AI-03·06 문장은 마크다운이 없는 일반 문장이다.
 
 **상태 전이**
 
