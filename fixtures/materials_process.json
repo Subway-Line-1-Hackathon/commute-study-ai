@@ -10,7 +10,7 @@
       "name": "스택과 큐",
       "pageStart": 1,
       "pageEnd": 2,
-      "summary": "- 스택은 나중에 넣은 데이터가 먼저 나오는 LIFO 구조예요. (1쪽)\n- 큐는 먼저 넣은 데이터가 먼저 나오는 FIFO 구조예요. (2쪽)"
+      "summary": "- **스택(Stack)**: 나중에 넣은 데이터가 먼저 나오는 LIFO 구조다. (1쪽)\n- **큐(Queue)**: 먼저 넣은 데이터가 먼저 나오는 FIFO 구조다. (2쪽)"
     }
   ],
   "meta": { "model": "mock", "inputTokens": 0, "outputTokens": 0, "elapsedMs": 0, "attempts": 1 }
