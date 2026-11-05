@@ -1,6 +1,7 @@
 import asyncio
 import hmac
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -9,7 +10,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app import pipelines
+from app import llm, pipelines
 from app.errors import ERRORS, AIError
 from app.schemas import (
     FeedbackRequest,
@@ -53,6 +54,7 @@ def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+log = logging.getLogger("main")
 app = FastAPI(title="commute-study-ai")
 v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_key)])
 fails = [Depends(raise_mock_error)]
@@ -110,22 +112,38 @@ def grade_essay(req: GradeEssayRequest):
 
 @v1.post("/tutor/ask")
 def tutor_ask(req: TutorAskRequest, error: AIError | None = Depends(mock_error)):
-    data = fixture("tutor_ask")
-    chunks = re.findall(r"\S+\s*", data["text"])
-    error = error if MOCK else None
-
-    async def events():
-        # 실제 스트림처럼 조금씩 보낸다. 에러를 시험할 때는 첫 조각 뒤에 끊는다.
-        for chunk in chunks[:1] if error else chunks:
-            yield sse("delta", {"text": chunk})
-            await asyncio.sleep(0.05)
-        yield sse("error", error.body()) if error else sse("done", {"meta": data["meta"]})
-
+    events = mock_tutor_events(error) if MOCK else tutor_events(req)
     return StreamingResponse(
-        events(),
+        events,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+async def tutor_events(req: TutorAskRequest):
+    usage = llm.Usage(model=llm.MODELS["AI05"])
+    try:
+        async for delta in pipelines.tutor_ask(req, usage):
+            yield sse("delta", {"text": delta})
+    except AIError as e:
+        # 스트림이 이미 열려 있어 상태 코드를 바꿀 수 없다. 에러는 이벤트로 보낸다.
+        yield sse("error", e.body())
+        return
+    except Exception:
+        log.exception("AI05 unexpected error")
+        yield sse("error", AIError("LLM_FAILED").body())
+        return
+    yield sse("done", {"meta": usage.meta()})
+
+
+async def mock_tutor_events(error: AIError | None):
+    data = fixture("tutor_ask")
+    chunks = re.findall(r"\S+\s*", data["text"])
+    # 실제 스트림처럼 조금씩 보낸다. 에러를 시험할 때는 첫 조각 뒤에 끊는다.
+    for chunk in chunks[:1] if error else chunks:
+        yield sse("delta", {"text": chunk})
+        await asyncio.sleep(0.05)
+    yield sse("error", error.body()) if error else sse("done", {"meta": data["meta"]})
 
 
 @v1.post("/sessions/feedback", dependencies=fails)
