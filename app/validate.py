@@ -71,13 +71,22 @@ def fix_categories(drafts: list[CategoryDraft], page_lengths: list[int]) -> list
 # ---------- AI-02 문제 ----------
 
 MAX_STEM = 300
+# 개념이 아니라 자료의 문구·제목·쪽 표시를 묻는 지문. 작은 단원에서 많이 나왔다 (eval/결과.md 11-06).
+# 다시 만들면 되므로 애매한 표현도 넓게 거른다.
+META_STEM = re.compile(
+    r"(자료|슬라이드|목차|강의)(에서는|에서|에는|에|는|의|가)\s"
+    r"|(라고|다고) (설명|적혀|제시|표현|소개|강조)"
+    r"|제목|항목에는|항목의"
+    r"|표현이 (나온|등장|쓰|있)"
+    r"|\d+\s*/\s*\d+\s*(로|으로)?\s*표시"
+)
 MAX_EXPLANATION = 600
 MIN_QUOTE = 10  # 정규화 후 글자 수. 너무 짧은 인용은 어디에나 있어 근거가 안 된다
 MAX_SHORT_ANSWER = 20
 MAX_ACCEPTED = 5
 MAX_TAGS = 3
 MAX_TAG = 20
-SIMILAR = 0.9
+SIMILAR = 0.75  # 같은 것을 말만 바꿔 물은 지문(0.75~0.89)을 거른다 (eval/결과.md 11-06)
 _BANNED_CHOICE = re.compile(r"모두\s*(옳|맞|틀)|정답\s*(이\s*)?없|위의?\s*보기")
 _NON_WORD = re.compile(r"[\W_]+")
 
@@ -120,7 +129,7 @@ def check_questions(
 
 
 def _check_one(d, qtype, difficulty, norm_pages, norm_all, rng) -> tuple[str | None, dict | None]:
-    if not d.stem.strip() or len(d.stem) > MAX_STEM:
+    if not d.stem.strip() or len(d.stem) > MAX_STEM or META_STEM.search(d.stem):
         return "schema", None
     if not d.explanation.strip() or len(d.explanation) > MAX_EXPLANATION:
         return "schema", None

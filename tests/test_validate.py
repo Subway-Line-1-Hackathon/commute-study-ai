@@ -210,3 +210,33 @@ def test_duplicates_against_existing_and_within_batch():
 
 def test_normalize():
     assert normalize("Ｑueue, 큐!  (FIFO)") == "queue큐fifo"
+
+
+@pytest.mark.parametrize(
+    "stem",
+    [
+        "자료에서는 모습이 달라도 의미는 같을 수 있다고 설명한다.",
+        "Pointer to Array의 첫 번째 항목은 4/4로 표시되어 있다.",
+        "Pointer to Array Example 항목의 제목에는 again이 포함되어 있다.",
+        "Pointers and Arrays 항목에는 NEXT ‘ELEMENT’라는 표현이 나온다.",
+        "자료의 목차에서 Function Pointer와 함께 제시된 항목은 무엇인가?",
+        "자료는 배열을 객체가 아니라고 설명한다.",
+    ],
+)
+def test_questions_about_the_material_wording_are_rejected(stem):
+    accepted, rejected = check([OXDraft(answer="O", **base(stem=stem))])
+    assert accepted == []
+    assert rejected["schema"] == 1
+
+
+@pytest.mark.parametrize(
+    "stem",
+    [
+        "자료구조 중 스택은 LIFO 구조다.",
+        "C++의 raw array는 객체가 아니어서 size() 같은 멤버 함수가 없다.",
+        "int a[4]에서 a + 1은 다음 바이트가 아니라 다음 요소를 가리킨다.",
+    ],
+)
+def test_concept_questions_pass_the_wording_filter(stem):
+    accepted, _ = check([OXDraft(answer="O", **base(stem=stem))])
+    assert len(accepted) == 1

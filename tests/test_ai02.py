@@ -21,7 +21,6 @@ from app.schemas import (
 
 QUOTE = "스택은 나중에 넣은 데이터가 먼저 나오는 구조다."
 PAGES = [{"page": 3, "text": QUOTE + " 푸시와 팝 연산을 쓴다."}, {"page": 4, "text": "큐는 먼저 넣은 데이터가 먼저 나오는 구조다."}]
-WORDS = ["가나", "다라", "마바", "사아", "자차", "카타", "파하", "거너", "더러", "머버", "서어", "저처", "커터", "퍼허"]
 
 
 def request(*specs, exclude=()) -> GenerateQuestionsRequest:
@@ -34,9 +33,10 @@ def request(*specs, exclude=()) -> GenerateQuestionsRequest:
 
 def draft(qtype: str, i: int, **overrides):
     """서로 다른 지문의 통과 가능한 문제. i가 달라야 중복으로 걸리지 않는다."""
-    word = WORDS[i % len(WORDS)] + str(i // len(WORDS))
+    # 서로 닮지 않은 지문이어야 중복 검사(유사도 0.75)에 걸리지 않는다
+    word = "".join(chr(0xAC00 + (i * 7919 + k * 104729) % 11172) for k in range(12))
     base = {
-        "stem": f"{word} 항목에 대한 {i}번 확인 문제",
+        "stem": f"{word} 확인 문제",
         "explanation": "스택은 나중에 넣은 것이 먼저 나와요.",
         "source_page": 3,
         "evidence_quote": QUOTE,
