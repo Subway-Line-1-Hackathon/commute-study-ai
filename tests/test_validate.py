@@ -27,11 +27,17 @@ def test_unsorted_and_first_start_not_one():
     assert cats[0]["name"] == "단원3"
 
 
-def test_small_category_merges_into_previous():
-    cats = fix_categories([draft(1), draft(3), draft(4)], [400, 400, 50, 400])
-    assert bounds(cats) == [(1, 1, 3), (2, 4, 4)]
-    assert cats[0]["name"] == "단원1"
-    assert cats[0]["summary"] == "요약\n요약"
+def test_small_category_merges_into_smaller_neighbor():
+    cats = fix_categories([draft(1), draft(2), draft(3)], [3000, 50, 1000])
+    assert bounds(cats) == [(1, 1, 1), (2, 2, 3)]
+    assert cats[1]["name"] == "단원3"  # 이름은 큰 쪽
+    assert cats[1]["summary"] == "요약\n요약"
+
+
+def test_small_categories_pair_up_instead_of_chaining():
+    # 앞 단원에만 합치면 2~5쪽이 모두 한 단원이 된다
+    cats = fix_categories([draft(i) for i in range(1, 7)], [2000, 600, 600, 600, 600, 2000])
+    assert bounds(cats) == [(1, 1, 1), (2, 2, 3), (3, 4, 5), (4, 6, 6)]
 
 
 def test_small_first_category_merges_into_next():

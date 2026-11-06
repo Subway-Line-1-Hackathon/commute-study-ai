@@ -15,7 +15,7 @@ class InvalidOutput(ValueError):
 # ---------- AI-01 단원 ----------
 
 MAX_CATEGORIES = 20
-MIN_CATEGORY_CHARS = 300  # 이보다 짧은 단원은 문제를 만들기 어려워 옆 단원에 합친다
+MIN_CATEGORY_CHARS = 1000  # 이보다 짧은 단원은 40문제를 만들기 어려워 옆 단원에 합친다 (eval/결과.md 11-06)
 MAX_SUMMARY_CHARS = 1500
 
 
@@ -48,11 +48,14 @@ def fix_categories(drafts: list[CategoryDraft], page_lengths: list[int]) -> list
         return sum(page_lengths[c["pageStart"] - 1 : c["pageEnd"]])
 
     while len(cats) > 1:
-        small = next((i for i, c in enumerate(cats) if chars(c) < MIN_CATEGORY_CHARS), None)
-        if small is None:
+        small_ones = [i for i, c in enumerate(cats) if chars(c) < MIN_CATEGORY_CHARS]
+        if not small_ones:
             break
-        keep = small - 1 if small > 0 else 1  # 앞 단원에 합치고, 첫 단원이면 뒤 단원에 합친다
-        a, b = sorted((small, keep))
+        # 가장 작은 단원을 앞뒤 중 더 작은 단원과 합친다. 한쪽으로만 합치면 작은 단원이 줄줄이 붙어 한 단원이 너무 커진다.
+        small = min(small_ones, key=lambda i: chars(cats[i]))
+        other = min((i for i in (small - 1, small + 1) if 0 <= i < len(cats)), key=lambda i: chars(cats[i]))
+        a, b = sorted((small, other))
+        keep = a if chars(cats[a]) >= chars(cats[b]) else b  # 이름은 큰 쪽을 쓴다
         cats[a : b + 1] = [
             {
                 "name": cats[keep]["name"],
