@@ -196,3 +196,32 @@ def test_daily_limit_fails_fast_instead_of_waiting(monkeypatch, waits):
     assert error_code(deadline=Deadline(270)) == "LLM_FAILED"
     assert waits == []
     assert len(responses.calls) == 1
+
+
+# ---------- 서버 오류(5xx) ----------
+
+
+def server_error():
+    return openai.InternalServerError("Internal server error", response=httpx2.Response(500, request=REQUEST), body=None)
+
+
+def test_server_error_is_retried_once(monkeypatch):
+    responses = flaky(monkeypatch, [server_error()])
+    usage = Usage(model="m")
+    assert call(usage=usage) == Answer(correct=True)
+    assert len(responses.calls) == 2
+    assert usage.attempts == 1
+
+
+def test_server_error_twice_is_llm_failed(monkeypatch):
+    responses = flaky(monkeypatch, [server_error(), openai.APIConnectionError(request=REQUEST)])
+    assert error_code() == "LLM_FAILED"
+    assert len(responses.calls) == 2
+
+
+def test_server_error_without_time_left_is_not_retried(monkeypatch):
+    responses = flaky(monkeypatch, [server_error()])
+    deadline = Deadline(5)
+    monkeypatch.setattr(deadline, "remaining", lambda: 0.5)
+    assert error_code(deadline=deadline) == "LLM_FAILED"
+    assert len(responses.calls) == 1

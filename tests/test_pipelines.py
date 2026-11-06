@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from test_extract import make_pdf
 
-from app import extract, llm, main, pipelines
+from app import extract, llm, main, pipelines, validate
 from app.errors import AIError
 from app.schemas import CategoriesOut, CategoryDraft, OcrText, ProcessMaterialRequest
 
@@ -72,7 +72,8 @@ def error_code(req=None) -> str:
     return e.value.code
 
 
-def test_text_pdf_is_split_into_categories(fake):
+def test_text_pdf_is_split_into_categories(fake, monkeypatch):
+    monkeypatch.setattr(validate, "MIN_CATEGORY_CHARS", 300)  # 테스트 PDF는 쪽마다 80자라 합쳐지지 않게 낮춘다
     calls = fake([make_pdf([LINE] * 10)], AI01=[categories(1, 6)])
     out = run()
 
