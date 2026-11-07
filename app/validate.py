@@ -15,7 +15,7 @@ class InvalidOutput(ValueError):
 # ---------- AI-01 단원 ----------
 
 MAX_CATEGORIES = 20
-MIN_CATEGORY_CHARS = 300  # 이보다 짧은 단원은 문제를 만들기 어려워 옆 단원에 합친다
+MIN_CATEGORY_CHARS = 1000  # 이보다 짧은 단원은 40문제를 만들기 어려워 옆 단원에 합친다 (eval/결과.md 11-06)
 MAX_SUMMARY_CHARS = 1500
 
 
@@ -48,11 +48,14 @@ def fix_categories(drafts: list[CategoryDraft], page_lengths: list[int]) -> list
         return sum(page_lengths[c["pageStart"] - 1 : c["pageEnd"]])
 
     while len(cats) > 1:
-        small = next((i for i, c in enumerate(cats) if chars(c) < MIN_CATEGORY_CHARS), None)
-        if small is None:
+        small_ones = [i for i, c in enumerate(cats) if chars(c) < MIN_CATEGORY_CHARS]
+        if not small_ones:
             break
-        keep = small - 1 if small > 0 else 1  # 앞 단원에 합치고, 첫 단원이면 뒤 단원에 합친다
-        a, b = sorted((small, keep))
+        # 가장 작은 단원을 앞뒤 중 더 작은 단원과 합친다. 한쪽으로만 합치면 작은 단원이 줄줄이 붙어 한 단원이 너무 커진다.
+        small = min(small_ones, key=lambda i: chars(cats[i]))
+        other = min((i for i in (small - 1, small + 1) if 0 <= i < len(cats)), key=lambda i: chars(cats[i]))
+        a, b = sorted((small, other))
+        keep = a if chars(cats[a]) >= chars(cats[b]) else b  # 이름은 큰 쪽을 쓴다
         cats[a : b + 1] = [
             {
                 "name": cats[keep]["name"],
@@ -68,13 +71,22 @@ def fix_categories(drafts: list[CategoryDraft], page_lengths: list[int]) -> list
 # ---------- AI-02 문제 ----------
 
 MAX_STEM = 300
+# 개념이 아니라 자료의 문구·제목·쪽 표시를 묻는 지문. 작은 단원에서 많이 나왔다 (eval/결과.md 11-06).
+# 다시 만들면 되므로 애매한 표현도 넓게 거른다.
+META_STEM = re.compile(
+    r"(자료|슬라이드|목차|강의)(에서는|에서|에는|에|는|의|가)\s"
+    r"|(라고|다고) (설명|적혀|제시|표현|소개|강조)"
+    r"|제목|항목에는|항목의"
+    r"|표현이 (나온|등장|쓰|있)"
+    r"|\d+\s*/\s*\d+\s*(로|으로)?\s*표시"
+)
 MAX_EXPLANATION = 600
 MIN_QUOTE = 10  # 정규화 후 글자 수. 너무 짧은 인용은 어디에나 있어 근거가 안 된다
 MAX_SHORT_ANSWER = 20
 MAX_ACCEPTED = 5
 MAX_TAGS = 3
 MAX_TAG = 20
-SIMILAR = 0.9
+SIMILAR = 0.75  # 같은 것을 말만 바꿔 물은 지문(0.75~0.89)을 거른다 (eval/결과.md 11-06)
 _BANNED_CHOICE = re.compile(r"모두\s*(옳|맞|틀)|정답\s*(이\s*)?없|위의?\s*보기")
 _NON_WORD = re.compile(r"[\W_]+")
 
@@ -117,7 +129,7 @@ def check_questions(
 
 
 def _check_one(d, qtype, difficulty, norm_pages, norm_all, rng) -> tuple[str | None, dict | None]:
-    if not d.stem.strip() or len(d.stem) > MAX_STEM:
+    if not d.stem.strip() or len(d.stem) > MAX_STEM or META_STEM.search(d.stem):
         return "schema", None
     if not d.explanation.strip() or len(d.explanation) > MAX_EXPLANATION:
         return "schema", None

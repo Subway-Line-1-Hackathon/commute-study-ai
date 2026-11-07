@@ -35,6 +35,8 @@ EFFORTS = {f: os.environ.get(f"EFFORT_{f}", e) for f, (_, e) in _DEFAULTS.items(
 
 RATE_LIMIT_WAITS = 3  # 분당 한도에 걸렸을 때 기다렸다 다시 보내는 최대 횟수
 MAX_RATE_LIMIT_WAIT = 30.0
+SERVER_RETRIES = 1  # OpenAI 서버 오류(5xx)·연결 오류를 다시 보내는 횟수
+MIN_SERVER_RETRY_SECONDS = 1.0  # 남은 시간이 이보다 적으면 다시 보내지 않는다
 
 _client: AsyncOpenAI | None = None
 
@@ -197,8 +199,10 @@ async def stream(
 
 
 async def _send(feature: str, model: str, started: float, deadline: Deadline, request: Callable[[], Awaitable]):
-    """요청을 보낸다. 분당 한도에 걸리면 알려준 시간만큼 기다렸다 다시 보낸다."""
-    for waits in range(RATE_LIMIT_WAITS + 1):
+    """요청을 보낸다. 분당 한도에 걸리면 알려준 시간만큼 기다렸다 다시 보내고,
+    OpenAI 서버 오류(5xx)·연결 오류는 시간이 남으면 1번 더 보낸다. 둘 다 attempts에는 세지 않는다."""
+    waits = server_retries = 0
+    while True:
         try:
             return await request()
         except openai.RateLimitError as e:
@@ -208,11 +212,19 @@ async def _send(feature: str, model: str, started: float, deadline: Deadline, re
             if "Request too large" in str(e) or waits == RATE_LIMIT_WAITS or too_long:
                 _log(feature, model, started, "LLM_FAILED RateLimitError")
                 raise AIError("LLM_FAILED") from None
+            waits += 1
             _log(feature, model, started, f"rate limited, wait {delay:.1f}s")
             await asyncio.sleep(delay)
         except openai.APITimeoutError:
             _log(feature, model, started, "LLM_TIMEOUT")
             raise AIError("LLM_TIMEOUT") from None
+        except (openai.InternalServerError, openai.APIConnectionError) as e:
+            # 2026-11-06 평가에서 5xx가 약 8번에 1번, 1초 안에 돌아왔다. 다시 보내면 대부분 성공한다.
+            if server_retries == SERVER_RETRIES or deadline.remaining() < MIN_SERVER_RETRY_SECONDS:
+                _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
+                raise AIError("LLM_FAILED") from None
+            server_retries += 1
+            _log(feature, model, started, f"{type(e).__name__}, retry")
         except (openai.OpenAIError, ValueError) as e:  # ValueError: 잘린 JSON 등 파싱 실패
             _log(feature, model, started, f"LLM_FAILED {type(e).__name__}")
             raise AIError("LLM_FAILED") from None

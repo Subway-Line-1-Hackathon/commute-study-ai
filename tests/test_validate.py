@@ -27,11 +27,17 @@ def test_unsorted_and_first_start_not_one():
     assert cats[0]["name"] == "단원3"
 
 
-def test_small_category_merges_into_previous():
-    cats = fix_categories([draft(1), draft(3), draft(4)], [400, 400, 50, 400])
-    assert bounds(cats) == [(1, 1, 3), (2, 4, 4)]
-    assert cats[0]["name"] == "단원1"
-    assert cats[0]["summary"] == "요약\n요약"
+def test_small_category_merges_into_smaller_neighbor():
+    cats = fix_categories([draft(1), draft(2), draft(3)], [3000, 50, 1000])
+    assert bounds(cats) == [(1, 1, 1), (2, 2, 3)]
+    assert cats[1]["name"] == "단원3"  # 이름은 큰 쪽
+    assert cats[1]["summary"] == "요약\n요약"
+
+
+def test_small_categories_pair_up_instead_of_chaining():
+    # 앞 단원에만 합치면 2~5쪽이 모두 한 단원이 된다
+    cats = fix_categories([draft(i) for i in range(1, 7)], [2000, 600, 600, 600, 600, 2000])
+    assert bounds(cats) == [(1, 1, 1), (2, 2, 3), (3, 4, 5), (4, 6, 6)]
 
 
 def test_small_first_category_merges_into_next():
@@ -204,3 +210,33 @@ def test_duplicates_against_existing_and_within_batch():
 
 def test_normalize():
     assert normalize("Ｑueue, 큐!  (FIFO)") == "queue큐fifo"
+
+
+@pytest.mark.parametrize(
+    "stem",
+    [
+        "자료에서는 모습이 달라도 의미는 같을 수 있다고 설명한다.",
+        "Pointer to Array의 첫 번째 항목은 4/4로 표시되어 있다.",
+        "Pointer to Array Example 항목의 제목에는 again이 포함되어 있다.",
+        "Pointers and Arrays 항목에는 NEXT ‘ELEMENT’라는 표현이 나온다.",
+        "자료의 목차에서 Function Pointer와 함께 제시된 항목은 무엇인가?",
+        "자료는 배열을 객체가 아니라고 설명한다.",
+    ],
+)
+def test_questions_about_the_material_wording_are_rejected(stem):
+    accepted, rejected = check([OXDraft(answer="O", **base(stem=stem))])
+    assert accepted == []
+    assert rejected["schema"] == 1
+
+
+@pytest.mark.parametrize(
+    "stem",
+    [
+        "자료구조 중 스택은 LIFO 구조다.",
+        "C++의 raw array는 객체가 아니어서 size() 같은 멤버 함수가 없다.",
+        "int a[4]에서 a + 1은 다음 바이트가 아니라 다음 요소를 가리킨다.",
+    ],
+)
+def test_concept_questions_pass_the_wording_filter(stem):
+    accepted, _ = check([OXDraft(answer="O", **base(stem=stem))])
+    assert len(accepted) == 1
