@@ -26,6 +26,7 @@ v0.1에서는 백엔드 스키마에 이름과 값을 맞췄다. 단원은 `cate
 | Base URL | `http://commute-study-ai.railway.internal:8000` (Railway 내부망) |
 | 인증 | `/v1` 요청에 `X-Internal-Key` 헤더. 값은 양쪽 환경변수로 공유. `/health`는 Railway 헬스체크용이라 키가 없다 |
 | mock 에러 | mock 단계에서는 `X-Mock-Error: <에러 코드>` 헤더로 실패 응답을 시험할 수 있다 |
+| mock 응답 | `AI_MOCK`이 true(기본)면 고정 예시를 돌려준다. AI-02 mock 문제의 `sourcePage`·`evidenceQuote`는 요청한 단원의 쪽을 돌아가며 채우고, 지문 앞에 `[mock N] 단원 이름:`을 붙인다 |
 | 형식 | JSON, UTF-8. 필드명은 camelCase. AI-05만 응답이 SSE |
 | 상태 | AI 서버는 DB가 없다. 필요한 내용은 매 요청에 담아 보내고, 저장은 백엔드가 한다 |
 

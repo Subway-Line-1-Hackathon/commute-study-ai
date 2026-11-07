@@ -91,8 +91,17 @@ async def generate_questions(req: GenerateQuestionsRequest):
         return await pipelines.generate_questions(req)
     data = fixture("questions_generate")
     specs = [(s.type, s.difficulty) for s in req.requests for _ in range(s.count)]
+    pages = req.category.pages
+    # 백엔드는 단원 쪽 범위 밖의 sourcePage를 버리므로, 쪽과 근거를 요청한 단원에서 돌아가며 가져온다.
     questions = [
-        {**data["samples"][t], "type": t, "difficulty": d, "stem": f"[mock {i}] {data['samples'][t]['stem']}"}
+        {
+            **data["samples"][t],
+            "type": t,
+            "difficulty": d,
+            "stem": f"[mock {i}] {req.category.name}: {data['samples'][t]['stem']}",
+            "sourcePage": (page := pages[(i - 1) % len(pages)]).page,
+            "evidenceQuote": page.text.strip()[:80] or data["samples"][t]["evidenceQuote"],
+        }
         for i, (t, d) in enumerate(specs, 1)
     ]
     return {"questions": questions, "shortfall": [], "rejected": data["rejected"], "meta": data["meta"]}
