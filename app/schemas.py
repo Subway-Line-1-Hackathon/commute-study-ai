@@ -124,11 +124,24 @@ class CategoriesOut(BaseModel):
     categories: list[CategoryDraft]
 
 
-class QuestionBase(BaseModel):
-    stem: str
-    explanation: str
+class Point(BaseModel):
+    """출제 포인트. 학생이 확인해야 할 사실 하나와 그 근거."""
+
+    statement: str
     source_page: int
     evidence_quote: str
+    importance: Literal["core", "minor"]
+    types: list[Literal["OX", "MC", "SHORT"]]
+
+
+class PlanOut(BaseModel):
+    points: list[Point]
+
+
+class QuestionBase(BaseModel):
+    point: int  # 출제 포인트 번호. 쪽과 근거는 코드가 포인트에서 붙인다
+    stem: str
+    explanation: str
     concept_tags: list[str]
 
 

@@ -2,8 +2,8 @@ import random
 
 import pytest
 
-from app.schemas import CategoryDraft, EssayDraft, MCDraft, OXDraft, ShortDraft
-from app.validate import InvalidOutput, check_questions, fix_categories, normalize
+from app.schemas import CategoryDraft, EssayDraft, MCDraft, OXDraft, Point, QuestionSpec, ShortDraft
+from app.validate import InvalidOutput, assign_points, capacity, check_points, check_questions, fix_categories, normalize
 
 # ---------- AI-01 ----------
 
@@ -77,19 +77,25 @@ STACK = "스택은 나중에 넣은 데이터가 먼저 나오는 구조다."
 QUEUE = "큐는 먼저 넣은 데이터가 먼저 나오는 구조다."
 
 
+def point(statement="스택은 LIFO 구조다.", page=3, quote=STACK, importance="core", types=("OX", "MC", "SHORT")) -> Point:
+    return Point(statement=statement, source_page=page, evidence_quote=quote, importance=importance, types=list(types))
+
+
+POINTS = {1: point(), 2: point("큐는 FIFO 구조다.", 4, QUEUE)}
+
+
 def base(**overrides) -> dict:
     fields = {
         "stem": "스택은 LIFO 구조다.",
         "explanation": "스택은 나중에 넣은 것이 먼저 나와요.",
-        "source_page": 3,
-        "evidence_quote": STACK,
+        "point": 1,
         "concept_tags": ["스택"],
     }
     return {**fields, **overrides}
 
 
 def check(drafts, qtype="OX", exclude=(), seed=0):
-    return check_questions(drafts, qtype, 2, PAGES, list(exclude), random.Random(seed))
+    return check_questions(drafts, qtype, 2, POINTS, PAGES, list(exclude), random.Random(seed))
 
 
 def test_ox_passes_with_api_shape():
@@ -108,26 +114,87 @@ def test_ox_passes_with_api_shape():
             "sourcePage": 3,
             "evidenceQuote": STACK,
             "conceptTags": ["스택"],
+            "point": 1,
         }
     ]
 
 
-def test_quote_matches_despite_spacing_and_punctuation():
-    accepted, _ = check([OXDraft(answer="O", **base(evidence_quote="스택은  나중에 넣은 데이터가, 먼저 나오는 구조다"))])
-    assert len(accepted) == 1
+def test_point_quote_matches_despite_spacing_and_punctuation():
+    assert len(check_points([point(quote="스택은  나중에 넣은 데이터가, 먼저 나오는 구조다")], PAGES)) == 1
 
 
-def test_quote_on_neighbor_page_fixes_source_page():
-    accepted, _ = check([OXDraft(answer="X", **base(source_page=3, evidence_quote=QUEUE))])
-    assert accepted[0]["sourcePage"] == 4
+def test_point_quote_on_neighbor_page_fixes_source_page():
+    assert check_points([point(page=3, quote=QUEUE)], PAGES)[0].source_page == 4
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        point(quote="자료에 없는 문장이 근거라고 주장한다"),
+        point(quote="스택은"),
+        point(types=()),
+        point(statement="자료에서는 스택을 LIFO라고 설명한다."),
+        point(statement="스택은 LIFO 구조이다."),  # 첫 포인트와 거의 같다
+    ],
+)
+def test_bad_points_are_dropped(bad):
+    assert check_points([point(), bad], PAGES) == [point()]
+
+
+def test_capacity_counts_core_types_and_one_per_minor():
+    points = [point(), point(types=("OX",)), point(importance="minor"), point(importance="minor")]
+    assert capacity(points) == 3 + 1 + 1 + 1
+    assert capacity([point()] * 20) == 40
+
+
+def spec(qtype, count, difficulty=2):
+    return QuestionSpec(type=qtype, difficulty=difficulty, count=count)
+
+
+def test_assign_spreads_types_and_never_repeats_a_point_type():
+    points = [point(f"사실 {i}") for i in range(4)] + [point("보조", importance="minor", types=("OX",))]
+    out = assign_points(points, [spec("OX", 5), spec("MC", 5), spec("SHORT", 5)], budget=40)
+    assert [len(o) for o in out] == [5, 4, 4]  # core 4개 × 3유형 + minor 1개 = 13
+    for nums in out:
+        assert len(nums) == len(set(nums))
+    assert 5 in out[0]
+
+
+def test_assign_uses_unused_points_first_and_respects_budget():
+    points = [point(f"사실 {i}") for i in range(6)]
+    out = assign_points(points, [spec("OX", 4), spec("MC", 4)], budget=6)
+    assert sum(map(len, out)) == 6
+    assert sorted(out[0] + out[1]) == [1, 2, 3, 4, 5, 6]
+
+
+def test_assign_keeps_request_ratio_when_capacity_is_short():
+    points = [point(f"사실 {i}") for i in range(5)]
+    out = assign_points(points, [spec("OX", 14), spec("MC", 13), spec("SHORT", 13)], budget=9)
+    assert [len(o) for o in out] == [3, 3, 3]
+
+
+def test_assign_fills_missing_types_with_other_types():
+    points = [point(f"사실 {i}", types=("OX", "MC")) for i in range(3)]
+    out = assign_points(points, [spec("OX", 1), spec("SHORT", 2)], budget=3)
+    assert out == [[1, 2, 3], []]
+
+
+def test_capacity_depends_on_requested_types():
+    points = [point(f"사실 {i}", types=("OX", "MC")) for i in range(3)]
+    assert capacity(points, ["SHORT"]) == 0
+    assert capacity(points, ["OX", "SHORT"]) == 3
+    assert capacity(points) == 6
+
+
+def test_assign_essay_only_from_core_points():
+    points = [point("보조", importance="minor"), point("핵심")]
+    assert assign_points(points, [spec("ESSAY", 2)], budget=5) == [[2]]
 
 
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
-        ({"evidence_quote": "자료에 없는 문장이 근거라고 주장한다"}, "evidence"),
-        ({"evidence_quote": "스택은"}, "evidence"),
-        ({"source_page": 9}, "schema"),
+        ({"point": 9}, "schema"),
         ({"stem": " "}, "schema"),
         ({"explanation": "가" * 601}, "schema"),
     ],
@@ -146,7 +213,7 @@ def test_concept_tags_are_trimmed():
 
 def mc(**overrides) -> MCDraft:
     fields = {"correct_choice": "큐", "wrong_choices": ["스택", "트리", "그래프"]}
-    return MCDraft(**{**base(stem="다음 중 FIFO 구조는?", evidence_quote=QUEUE, source_page=4), **fields, **overrides})
+    return MCDraft(**{**base(stem="다음 중 FIFO 구조는?", point=2), **fields, **overrides})
 
 
 def test_mc_shuffle_points_to_correct_choice_and_spreads_positions():
@@ -170,6 +237,11 @@ def test_mc_shuffle_points_to_correct_choice_and_spreads_positions():
 )
 def test_mc_invalid_choices(overrides):
     assert check([mc(**overrides)], "MC")[1]["schema"] == 1
+
+
+def test_mc_choices_differing_only_by_symbols_are_distinct():
+    accepted, _ = check([mc(correct_choice="plain", wrong_choices=["<<plain>>", "plain***", "FIXED"])], "MC")
+    assert len(accepted) == 1
 
 
 def short(**overrides) -> ShortDraft:
@@ -200,12 +272,19 @@ def test_essay_rubric_size(rubric, ok):
 def test_duplicates_against_existing_and_within_batch():
     drafts = [
         OXDraft(answer="O", **base(stem="스택은 LIFO 구조다")),
-        OXDraft(answer="O", **base(stem="큐는 FIFO 구조다.")),
+        OXDraft(answer="O", **base(stem="큐는 FIFO 구조다.", point=2)),
         OXDraft(answer="O", **base(stem="큐는 FIFO 구조이다.")),
     ]
     accepted, rejected = check(drafts, exclude=["스택은 LIFO 구조다."])
     assert [q["stem"] for q in accepted] == ["큐는 FIFO 구조다."]
     assert rejected["duplicate"] == 2
+
+
+def test_one_question_per_point():
+    drafts = [OXDraft(answer="O", **base()), OXDraft(answer="X", **base(stem="푸시와 팝은 스택의 연산이 아니다."))]
+    accepted, rejected = check(drafts)
+    assert len(accepted) == 1
+    assert rejected["duplicate"] == 1
 
 
 def test_normalize():
