@@ -140,3 +140,12 @@ def test_tutor_error_keeps_partial_text():
     r = client.post("/v1/tutor/ask", json=REQUESTS["/v1/tutor/ask"], headers={**KEY, "X-Mock-Error": "LLM_TIMEOUT"})
     assert events(r.text) == ["delta", "error"]
     assert '"code": "LLM_TIMEOUT"' in r.text
+
+
+def test_mock_source_pages_stay_in_category():
+    # 백엔드는 단원 쪽 범위 밖의 sourcePage를 버린다 (#38)
+    category = {"categoryId": 2, "name": "큐", "pages": [{"page": 4, "text": "큐는 FIFO 구조다."}, {"page": 5, "text": "덱은 양쪽 끝에서 넣고 뺀다."}]}
+    body = {"category": category, "requests": [{"type": "SHORT", "difficulty": 1, "count": 3}]}
+    questions = client.post("/v1/questions/generate", json=body, headers=KEY).json()["questions"]
+    assert [q["sourcePage"] for q in questions] == [4, 5, 4]
+    assert questions[1]["evidenceQuote"] == "덱은 양쪽 끝에서 넣고 뺀다."
