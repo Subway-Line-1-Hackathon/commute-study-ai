@@ -3,7 +3,7 @@
     set -a; source .env; set +a
     .venv/bin/python -m eval.try_plan eval/out/자료.pdf.ai01.json 5 1
 
-단원마다 포인트를 뽑고, 근거 대조를 통과한 포인트 수로 만들 수 있는 문제 수를 계산한다.
+단원마다 포인트를 뽑고, 검증을 통과한 포인트로 만들 수 있는 문제 수를 계산한다.
 포인트 목록은 eval/out/<자료>.u<order>.plan.md로 쓴다.
 """
 
@@ -12,33 +12,12 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Literal
-
-from pydantic import BaseModel
 
 from app import llm
-from app.validate import _evidence_page, normalize
+from app.pipelines import AI02_PLAN_MAX_OUTPUT, AI02_PLAN_PROMPT as PROMPT
+from app.schemas import PlanOut
+from app.validate import capacity, check_points
 from eval.run_ai01 import OUT, PRICES
-
-PROMPT = (Path(__file__).parent.parent / "app" / "prompts" / "AI-02-PLAN.md").read_text(encoding="utf-8")
-MAX_QUESTIONS = 40
-
-
-class Point(BaseModel):
-    statement: str
-    source_page: int
-    evidence_quote: str
-    importance: Literal["core", "minor"]
-    types: list[Literal["OX", "MC", "SHORT"]]
-
-
-class PlanOut(BaseModel):
-    points: list[Point]
-
-
-def capacity(points: list[Point]) -> int:
-    """핵심 포인트는 고른 유형마다 하나씩(최대 3), 보조 포인트는 한 유형으로 묻는다."""
-    return min(MAX_QUESTIONS, sum(min(len(p.types), 3 if p.importance == "core" else 1) for p in points))
 
 
 async def run(path: Path, order: int):
@@ -55,11 +34,10 @@ async def run(path: Path, order: int):
         schema=PlanOut,
         deadline=llm.Deadline(60),
         usage=usage,
-        max_output_tokens=12000,
+        max_output_tokens=AI02_PLAN_MAX_OUTPUT,
         cache_key=f"category-{order}",
     )
-    norm_pages = {p: normalize(t) for p, t in pages.items()}
-    valid = [p for p in out.points if _evidence_page(p.evidence_quote, p.source_page, norm_pages)]
+    valid = check_points(out.points, pages)
     by_type = {t: sum(t in p.types for p in valid) for t in ("OX", "MC", "SHORT")}
     price_in, price_out = PRICES.get(usage.model, (0, 0))
     cost = (usage.input_tokens * price_in + usage.output_tokens * price_out) / 1_000_000
@@ -71,7 +49,7 @@ async def run(path: Path, order: int):
     )
     lines = [f"# {cat['name']} ({chars}자) 출제 포인트", ""]
     for i, p in enumerate(out.points, 1):
-        ok = "" if p in valid else " (근거 불일치)"
+        ok = "" if any(v.statement == p.statement for v in valid) else " (탈락: 근거 불일치·자료 문구·중복)"
         lines.append(f"{i}. [{p.importance}/{','.join(p.types)}] {p.statement} ({p.source_page}쪽){ok}")
     OUT.mkdir(exist_ok=True)
     (OUT / f"{path.name.removesuffix('.ai01.json')}.u{order}.plan.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

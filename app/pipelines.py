@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-import math
 from collections import Counter
 from collections.abc import AsyncIterator
 import os
@@ -23,16 +22,19 @@ from app.schemas import (
     JudgeOut,
     JudgeShortRequest,
     OcrText,
+    PlanOut,
+    Point,
     ProcessMaterialRequest,
     QuestionSpec,
     TutorAskRequest,
 )
-from app.validate import InvalidOutput, check_questions, fix_categories, normalize
+from app.validate import InvalidOutput, assign_points, capacity, check_points, check_questions, fix_categories, normalize
 
 PROMPTS = Path(__file__).parent / "prompts"
 OCR_PROMPT = (PROMPTS / "OCR.md").read_text(encoding="utf-8")
 AI01_PROMPT = (PROMPTS / "AI-01.md").read_text(encoding="utf-8")
 AI02_PROMPT = (PROMPTS / "AI-02.md").read_text(encoding="utf-8")
+AI02_PLAN_PROMPT = (PROMPTS / "AI-02-PLAN.md").read_text(encoding="utf-8")
 AI03_PROMPT = (PROMPTS / "AI-03.md").read_text(encoding="utf-8")
 AI05_PROMPT = (PROMPTS / "AI-05.md").read_text(encoding="utf-8")
 AI06_PROMPT = (PROMPTS / "AI-06.md").read_text(encoding="utf-8")
@@ -47,11 +49,12 @@ AI01_MIN_RETRY_SECONDS = 60  # 남은 시간이 이보다 적으면 단원화를
 AI01_MAX_OUTPUT = 16000
 
 # 추가 생성이 60초 이내여야 한다(기능명세서 5장). 요청만으로 사전 생성과 구분할 수 없어 둘 다 55초다.
-# 다 못 만든 몫은 shortfall로 돌려주고, 백엔드가 모자란 몫만 다시 요청한다.
+# 출제 계획(포인트 추출) → 코드 배정 → 포인트당 문제 하나 (docs/AI-02_출제_재설계.md).
+# 자료가 받쳐 주는 만큼만 만든다. 그 상한이 capacity이고, 요청보다 적으면 shortfall이 생긴다.
 AI02_SECONDS = 55
-AI02_ROUNDS = 3  # 첫 생성 + 부족분 재생성 2번
-AI02_MIN_ROUND_SECONDS = 20  # 남은 시간이 이보다 적으면 재생성하지 않는다
-AI02_EXTRA = 1.2  # 검증에서 버려질 몫을 생각해 더 요청한다
+AI02_PLAN_MAX_OUTPUT = 12000
+AI02_ROUNDS = 2  # 첫 생성 + 탈락한 포인트만 한 번 더
+AI02_MIN_ROUND_SECONDS = 10  # 남은 시간이 이보다 적으면 다시 만들지 않는다. 시간 안에 못 끝내도 만든 문제는 남는다
 AI02_CHUNK = 10  # 한 호출에서 만드는 최대 문제 수. 출력이 길수록 느려져 나눠서 동시에 부른다
 AI02_TOKENS_PER_QUESTION = 600
 
@@ -209,51 +212,84 @@ async def generate_questions(req: GenerateQuestionsRequest, rng: random.Random |
     rejected = {"schema": 0, "evidence": 0, "duplicate": 0}
     rng = rng or random.Random()
 
+    points = await _plan(req, pages, document, deadline, usage)
+    # 추가 생성이면 이미 있는 문제만큼 덜 만든다. 어느 포인트를 썼는지는 모르니 중복 검사로 거른다.
+    limit = capacity(points, [s.type for s in req.requests])
+    budget = min(sum(s.count for s in req.requests), limit - len(req.exclude_stems))
+    assigned = assign_points(points, req.requests, budget)
     results = await asyncio.gather(
-        *(_generate_spec(s, req, pages, document, deadline, usage, rejected, rng) for s in req.requests)
+        *(
+            _generate_spec(s, nums, points, req, pages, document, deadline, usage, rejected, rng)
+            for s, nums in zip(req.requests, assigned)
+        )
     )
     questions = [q for qs in results for q in qs]
-    if not questions:
+    if any(assigned) and not questions:
         raise AIError("LLM_FAILED")
     shortfall = [
         {"type": s.type, "difficulty": s.difficulty, "count": s.count - len(qs)}
         for s, qs in zip(req.requests, results)
         if len(qs) < s.count
     ]
-    return {"questions": questions, "shortfall": shortfall, "rejected": rejected, "meta": usage.meta()}
+    return {"questions": questions, "shortfall": shortfall, "capacity": limit, "rejected": rejected, "meta": usage.meta()}
 
 
-async def _generate_spec(spec: QuestionSpec, req, pages, document, deadline, usage, rejected, rng) -> list[dict]:
-    """유형·난이도 하나의 문제를 만든다. 검증에서 빠진 만큼만 다시 만든다."""
+async def _plan(req: GenerateQuestionsRequest, pages, document, deadline, usage) -> list[Point]:
+    """단원에서 물을 가치가 있는 출제 포인트를 뽑는다. 근거가 자료에 없는 포인트는 버린다."""
+    out = await llm.parse(
+        "AI02",
+        instructions=AI02_PLAN_PROMPT,
+        input=f"단원: {req.category.name}\n<document>\n{document}\n</document>",
+        schema=PlanOut,
+        deadline=deadline,
+        usage=usage,
+        max_output_tokens=AI02_PLAN_MAX_OUTPUT,
+        cache_key=f"category-{req.category.category_id}",
+    )
+    points = check_points(out.points, pages)
+    if not points:
+        raise AIError("LLM_FAILED")
+    return points
+
+
+async def _generate_spec(spec: QuestionSpec, nums: list[int], points, req, pages, document, deadline, usage, rejected, rng):
+    """배정된 포인트마다 문제 하나를 만든다. 검증에서 빠진 포인트만 다시 만든다."""
     accepted: list[dict] = []
-    for _ in range(AI02_ROUNDS):
-        need = spec.count - len(accepted)
-        if need <= 0 or deadline.remaining() < AI02_MIN_ROUND_SECONDS:
+    todo = nums
+    for round_ in range(AI02_ROUNDS):
+        if not todo or (round_ and deadline.remaining() < AI02_MIN_ROUND_SECONDS):
             break
         exclude = req.exclude_stems + [q["stem"] for q in accepted]
-        ask = math.ceil(need * AI02_EXTRA)
-        chunks = [min(AI02_CHUNK, ask - i) for i in range(0, ask, AI02_CHUNK)]
+        chunks = [todo[i : i + AI02_CHUNK] for i in range(0, len(todo), AI02_CHUNK)]
         outs = await asyncio.gather(
-            *(_ask_questions(spec, n, req.category.category_id, document, exclude, deadline, usage) for n in chunks),
+            *(_ask_questions(spec, chunk, points, req.category.category_id, document, exclude, deadline, usage) for chunk in chunks),
             return_exceptions=True,
         )
-        drafts = [d for out in outs if not isinstance(out, BaseException) for d in out.questions]
         for out in outs:
             if isinstance(out, BaseException) and not isinstance(out, AIError):
                 raise out
-        new, counts = check_questions(drafts, spec.type, spec.difficulty, pages, exclude, rng)
+        drafts = [d for out in outs if not isinstance(out, BaseException) for d in out.questions]
+        mine = {n: points[n - 1] for n in todo}
+        new, counts = check_questions(drafts, spec.type, spec.difficulty, mine, pages, exclude, rng)
         for reason, n in counts.items():
             rejected[reason] += n
         accepted += new
-    return accepted[: spec.count]
+        done = {q["point"] for q in new}
+        todo = [n for n in todo if n not in done]
+    for q in accepted:
+        del q["point"]
+    return accepted
 
 
-async def _ask_questions(spec: QuestionSpec, count: int, category_id: int, document: str, exclude, deadline, usage):
+async def _ask_questions(spec: QuestionSpec, nums: list[int], points, category_id: int, document: str, exclude, deadline, usage):
     # 자료를 앞에 두어 같은 단원의 호출끼리 프롬프트 캐시를 나눠 쓴다.
     existing = "\n".join(f"- {s}" for s in exclude[-60:]) or "(없음)"
+    listed = "\n".join(
+        f'{n}. {points[n - 1].statement}\n   근거({points[n - 1].source_page}쪽): "{points[n - 1].evidence_quote}"' for n in nums
+    )
     request = (
-        f"유형: {spec.type}\n난이도: {spec.difficulty} ({DIFFICULTY_NAMES[spec.difficulty]})\n개수: {count}\n"
-        f"이미 있는 문제:\n{existing}"
+        f"유형: {spec.type}\n난이도: {spec.difficulty} ({DIFFICULTY_NAMES[spec.difficulty]})\n개수: {len(nums)}\n"
+        f"출제 포인트:\n{listed}\n\n이미 있는 문제:\n{existing}"
     )
     return await llm.parse(
         "AI02",
@@ -262,7 +298,7 @@ async def _ask_questions(spec: QuestionSpec, count: int, category_id: int, docum
         schema=QUESTION_OUTPUTS[spec.type],
         deadline=deadline,
         usage=usage,
-        max_output_tokens=count * AI02_TOKENS_PER_QUESTION + 2000,
+        max_output_tokens=len(nums) * AI02_TOKENS_PER_QUESTION + 2000,
         cache_key=f"category-{category_id}",
     )
 

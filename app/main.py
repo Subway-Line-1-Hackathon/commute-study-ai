@@ -104,7 +104,8 @@ async def generate_questions(req: GenerateQuestionsRequest):
         }
         for i, (t, d) in enumerate(specs, 1)
     ]
-    return {"questions": questions, "shortfall": [], "rejected": data["rejected"], "meta": data["meta"]}
+    capacity = len(specs) + len(req.exclude_stems)  # mock은 요청한 만큼 만들 수 있다고 답한다
+    return {"questions": questions, "shortfall": [], "capacity": capacity, "rejected": data["rejected"], "meta": data["meta"]}
 
 
 @v1.post("/answers/judge-short", dependencies=fails)

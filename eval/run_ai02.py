@@ -43,7 +43,7 @@ async def run(path: Path, order: int):
     price_in, price_out = PRICES.get(meta["model"], (0, 0))
     cost = (meta["inputTokens"] * price_in + meta["outputTokens"] * price_out) / 1_000_000
     print(
-        f"{name} ({cat['name']}, {chars}자): {len(out['questions'])}문제, {meta['elapsedMs'] / 1000:.0f}초, "
+        f"{name} ({cat['name']}, {chars}자): {len(out["questions"])}문제 (capacity {out["capacity"]}), {meta['elapsedMs'] / 1000:.0f}초, "
         f"호출 {meta['attempts']}회, ${cost:.3f}, 탈락 {out['rejected']}, 부족 {out['shortfall']}"
     )
     answers = [q["answer"] for q in out["questions"] if q["type"] == "MC"]
