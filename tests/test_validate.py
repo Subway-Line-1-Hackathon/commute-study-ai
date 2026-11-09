@@ -77,8 +77,15 @@ STACK = "스택은 나중에 넣은 데이터가 먼저 나오는 구조다."
 QUEUE = "큐는 먼저 넣은 데이터가 먼저 나오는 구조다."
 
 
-def point(statement="스택은 LIFO 구조다.", page=3, quote=STACK, importance="core", types=("OX", "MC", "SHORT")) -> Point:
-    return Point(statement=statement, source_page=page, evidence_quote=quote, importance=importance, types=list(types))
+def point(statement="스택은 LIFO 구조다.", page=3, quote=STACK, importance="core", types=("OX", "MC", "SHORT"), concept="") -> Point:
+    return Point(
+        statement=statement,
+        concept=concept or statement,
+        source_page=page,
+        evidence_quote=quote,
+        importance=importance,
+        types=list(types),
+    )
 
 
 POINTS = {1: point(), 2: point("큐는 FIFO 구조다.", 4, QUEUE)}
@@ -94,8 +101,8 @@ def base(**overrides) -> dict:
     return {**fields, **overrides}
 
 
-def check(drafts, qtype="OX", exclude=(), seed=0):
-    return check_questions(drafts, qtype, 2, POINTS, PAGES, list(exclude), random.Random(seed))
+def check(drafts, qtype="OX", exclude=(), seed=0, pages=None):
+    return check_questions(drafts, qtype, 2, POINTS, pages or PAGES, list(exclude), random.Random(seed))
 
 
 def test_ox_passes_with_api_shape():
@@ -142,9 +149,14 @@ def test_bad_points_are_dropped(bad):
 
 
 def test_capacity_counts_core_types_and_one_per_minor():
-    points = [point(), point(types=("OX",)), point(importance="minor"), point(importance="minor")]
-    assert capacity(points) == 3 + 1 + 1 + 1
-    assert capacity([point()] * 20) == 40
+    points = [point("가"), point("나", types=("OX",)), point("다", importance="minor"), point("라", importance="minor")]
+    assert capacity(points) == 2 + 1 + 1 + 1
+    assert capacity([point(f"사실 {i}") for i in range(30)]) == 40
+
+
+def test_one_concept_gets_at_most_four_questions():
+    points = [point(f"DOCTYPE 사실 {i}", concept="DOCTYPE 선언") for i in range(5)] + [point("p 태그")]
+    assert capacity(points) == 4 + 2
 
 
 def spec(qtype, count, difficulty=2):
@@ -154,7 +166,8 @@ def spec(qtype, count, difficulty=2):
 def test_assign_spreads_types_and_never_repeats_a_point_type():
     points = [point(f"사실 {i}") for i in range(4)] + [point("보조", importance="minor", types=("OX",))]
     out = assign_points(points, [spec("OX", 5), spec("MC", 5), spec("SHORT", 5)], budget=40)
-    assert [len(o) for o in out] == [5, 4, 4]  # core 4개 × 3유형 + minor 1개 = 13
+    assert sum(map(len, out)) == 9  # core 4개 × 2문제 + minor 1개
+    assert [len(o) for o in out] == [3, 3, 3]
     for nums in out:
         assert len(nums) == len(set(nums))
     assert 5 in out[0]
@@ -168,7 +181,7 @@ def test_assign_uses_unused_points_first_and_respects_budget():
 
 
 def test_assign_keeps_request_ratio_when_capacity_is_short():
-    points = [point(f"사실 {i}") for i in range(5)]
+    points = [point(f"사실 {i}") for i in range(6)]
     out = assign_points(points, [spec("OX", 14), spec("MC", 13), spec("SHORT", 13)], budget=9)
     assert [len(o) for o in out] == [3, 3, 3]
 
@@ -239,6 +252,27 @@ def test_mc_invalid_choices(overrides):
     assert check([mc(**overrides)], "MC")[1]["schema"] == 1
 
 
+@pytest.mark.parametrize(
+    ("draft", "qtype"),
+    [
+        (lambda: short(stem="Config가 OPENAI_API_KEY 값을 읽는 환경 변수 이름은?", answer="OPENAI_API_KEY"), "SHORT"),
+        (lambda: mc(stem="@app.route(\"/about\")로 등록한 함수의 URL은?", correct_choice="/about"), "MC"),
+    ],
+)
+def test_answer_written_in_the_stem_is_rejected(draft, qtype):
+    assert check([draft()], qtype)[1]["schema"] == 1
+
+
+def test_tag_answer_is_not_leaked_by_the_language_name():
+    accepted, _ = check([short(stem="다른 모든 HTML 요소를 담는 컨테이너 태그는?", answer="<html>")], "SHORT", pages={3: "<html> 스택은"})
+    assert len(accepted) == 1
+
+
+def test_short_answers_may_appear_in_stem_by_chance():
+    accepted, _ = check([short(stem="스택에서 나중에 넣은 것이 먼저 나오는 구조는?", answer="스택")], "SHORT")
+    assert len(accepted) == 1
+
+
 def test_mc_choices_differing_only_by_symbols_are_distinct():
     accepted, _ = check([mc(correct_choice="plain", wrong_choices=["<<plain>>", "plain***", "FIXED"])], "MC")
     assert len(accepted) == 1
@@ -300,6 +334,7 @@ def test_normalize():
         "Pointers and Arrays 항목에는 NEXT ‘ELEMENT’라는 표현이 나온다.",
         "자료의 목차에서 Function Pointer와 함께 제시된 항목은 무엇인가?",
         "자료는 배열을 객체가 아니라고 설명한다.",
+        "슬라이드 제목에 again이 포함되어 있다.",
     ],
 )
 def test_questions_about_the_material_wording_are_rejected(stem):
@@ -314,6 +349,7 @@ def test_questions_about_the_material_wording_are_rejected(stem):
         "자료구조 중 스택은 LIFO 구조다.",
         "C++의 raw array는 객체가 아니어서 size() 같은 멤버 함수가 없다.",
         "int a[4]에서 a + 1은 다음 바이트가 아니라 다음 요소를 가리킨다.",
+        "서로 다른 수준의 제목을 정의하는 HTML 태그는 h1부터 h6까지다.",
     ],
 )
 def test_concept_questions_pass_the_wording_filter(stem):
