@@ -138,6 +138,23 @@ def test_png_pages_go_through_ocr(fake):
     assert [f for f, _ in calls] == ["OCR", "OCR", "AI01"]
 
 
+def test_phone_photo_is_rotated_upright():
+    buf = io.BytesIO()
+    exif = Image.Exif()
+    exif[0x0112] = 6  # 오른쪽으로 90도 돌려 봐야 하는 사진
+    Image.new("RGB", (400, 100), "white").save(buf, "JPEG", exif=exif)
+    assert Image.open(io.BytesIO(extract.to_jpeg(buf.getvalue()))).size == (100, 400)
+
+
+def test_jpg_pages_go_through_ocr(fake):
+    buf = io.BytesIO()
+    Image.new("RGB", (800, 600), "white").save(buf, "JPEG")
+    calls = fake([buf.getvalue()], OCR=[OcrText(text=LINE * 4)], AI01=[categories(1)])
+    out = run(request("JPG", urls=1))
+    assert [p["text"] for p in out["pages"]] == [LINE * 4]
+    assert [f for f, _ in calls] == ["OCR", "AI01"]
+
+
 def test_images_are_shrunk_to_jpeg():
     jpeg = extract.to_jpeg(png())
     assert jpeg[:2] == b"\xff\xd8"

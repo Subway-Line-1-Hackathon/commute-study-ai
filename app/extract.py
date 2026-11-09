@@ -11,13 +11,14 @@ import zipfile
 from dataclasses import dataclass
 
 import pypdfium2 as pdfium
-from PIL import Image
+from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from app.errors import AIError
 
-MAX_PAGES = {"PDF": 100, "PPT": 100, "PNG": 20}
+MAX_PAGES = {"PDF": 100, "PPT": 100, "PNG": 20, "JPG": 20}
+IMAGE_TYPES = ("PNG", "JPG")  # 이미지 요청에는 두 형식을 섞어 보내도 된다 (스크린샷과 폰 사진)
 IMAGE_MAX_SIDE = 1600  # OCR에 보내는 이미지의 긴 변
 JPEG_QUALITY = 80
 MIN_CHARS = 30  # 이보다 적으면 스캔 쪽으로 본다
@@ -36,11 +37,12 @@ class ExtractedPage:
 
 
 def extract(files: list[bytes], file_type: str) -> list[ExtractedPage]:
-    """files는 PDF·PPT면 1개, PNG면 쪽 순서대로 여러 개다."""
-    if file_type == "PNG":
-        _check_limit(len(files), "PNG")
+    """files는 PDF·PPT면 1개, 이미지(PNG·JPG)면 쪽 순서대로 여러 개다."""
+    if file_type in IMAGE_TYPES:
+        _check_limit(len(files), file_type)
         for data in files:
-            _expect_type(data, "PNG")
+            if detect_type(data) not in IMAGE_TYPES:
+                raise AIError("UNSUPPORTED_FILE")
         return [ExtractedPage(i, "", True) for i in range(1, len(files) + 1)]
 
     data = files[0]
@@ -58,6 +60,8 @@ def detect_type(data: bytes) -> str:
         return "PDF"
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "PNG"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "JPG"
     if data.startswith(b"PK"):
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z:
@@ -110,8 +114,8 @@ def render_pdf_pages(data: bytes, pages: list[int]) -> dict[int, bytes]:
 
 
 def to_jpeg(data: bytes) -> bytes:
-    """PNG 등 이미지를 OCR용 JPEG로 줄인다."""
-    image = Image.open(io.BytesIO(data))
+    """PNG·JPG 이미지를 OCR용 JPEG로 줄인다. 폰 사진은 EXIF 회전 정보대로 바로 세운다."""
+    image = ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
     image.thumbnail((IMAGE_MAX_SIDE, IMAGE_MAX_SIDE))
     return _jpeg(image)
 
