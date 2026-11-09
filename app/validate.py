@@ -4,8 +4,9 @@ import difflib
 import random
 import re
 import unicodedata
+from collections import Counter
 
-from app.schemas import CategoryDraft, EssayDraft, MCDraft, OXDraft, QuestionBase, ShortDraft
+from app.schemas import CategoryDraft, EssayDraft, MCDraft, OXDraft, Point, QuestionBase, QuestionSpec, ShortDraft
 
 
 class InvalidOutput(ValueError):
@@ -96,48 +97,121 @@ def normalize(text: str) -> str:
     return _NON_WORD.sub("", unicodedata.normalize("NFKC", text).lower())
 
 
+MAX_QUESTIONS = 40
+POINT_QUESTIONS = {"core": 3, "minor": 1}  # 포인트 하나로 낼 수 있는 최대 문제 수 (docs/AI-02_출제_재설계.md 2장)
+
+
+def check_points(points: list[Point], pages: dict[int, str]) -> list[Point]:
+    """근거가 단원 자료에 있고, 자료 문구를 묻지 않고, 서로 겹치지 않는 포인트만 남긴다.
+
+    source_page는 근거가 실제로 있는 쪽으로 고친다.
+    """
+    norm_pages = {p: normalize(t) for p, t in pages.items()}
+    kept, seen = [], []
+    for p in points:
+        page = _evidence_page(p.evidence_quote, p.source_page, norm_pages)
+        statement = normalize(p.statement)
+        if page is None or not p.types or META_STEM.search(p.statement) or _similar(statement, seen):
+            continue
+        seen.append(statement)
+        kept.append(p.model_copy(update={"source_page": page, "types": list(dict.fromkeys(p.types))}))
+    return kept[:MAX_QUESTIONS]
+
+
+def capacity(points: list[Point], types=("OX", "MC", "SHORT")) -> int:
+    """이 포인트들로 해당 유형의 문제를 최대 몇 개 낼 수 있는지. core는 고른 유형마다 하나(최대 3), minor는 하나."""
+    specs = [QuestionSpec(type=t, difficulty=2, count=MAX_QUESTIONS) for t in dict.fromkeys(types)]
+    return sum(map(len, assign_points(points, specs, MAX_QUESTIONS)))
+
+
+def assign_points(points: list[Point], specs: list[QuestionSpec], budget: int) -> list[list[int]]:
+    """요청 항목마다 출제할 포인트 번호(1부터)를 정한다.
+
+    요청 비율대로 배정하되 포인트가 고른 유형 안에서만 배정한다. 어떤 유형의 포인트가 모자라면 남은 몫을
+    다른 항목이 요청 수를 넘겨 채운다. 같은 포인트를 같은 유형으로 두 번 쓰지 않고, 덜 쓴 포인트와 core 포인트를
+    먼저 쓴다. 서술형은 core 포인트로만 낸다.
+    """
+    used: Counter[int] = Counter()
+    taken: set[tuple[int, str]] = set()
+    out: list[list[int]] = [[] for _ in specs]
+    for capped in (True, False):
+        open_specs = {i for i, s in enumerate(specs) if s.count}
+        while budget > 0 and open_specs:
+            # 요청 대비 가장 덜 채운 항목부터 하나씩 배정한다
+            i = min(open_specs, key=lambda i: (len(out[i]) / specs[i].count, i))
+            qtype = specs[i].type
+            candidates = [
+                n
+                for n, p in enumerate(points, 1)
+                if (n, qtype) not in taken
+                and used[n] < POINT_QUESTIONS[p.importance]
+                and (qtype in p.types or (qtype == "ESSAY" and p.importance == "core"))
+            ]
+            if not candidates:
+                open_specs.discard(i)
+                continue
+            n = min(candidates, key=lambda n: (used[n], points[n - 1].importance != "core", n))
+            used[n] += 1
+            taken.add((n, qtype))
+            out[i].append(n)
+            budget -= 1
+            if capped and len(out[i]) >= specs[i].count:
+                open_specs.discard(i)
+    return out
+
+
 def check_questions(
     drafts: list[QuestionBase],
     qtype: str,
     difficulty: int,
+    points: dict[int, Point],
     pages: dict[int, str],
     exclude_stems: list[str],
     rng: random.Random | None = None,
 ) -> tuple[list[dict], dict[str, int]]:
     """검증을 통과한 문제를 API 응답 형태로 바꾸고, 탈락 사유별 개수를 센다.
 
+    points는 이번에 배정한 포인트만 담는다. 포인트 하나에 문제 하나만 받는다.
     pages는 단원에 속한 쪽만 담는다. exclude_stems는 이미 있는 문제 지문이다.
     """
     rng = rng or random.Random()
-    norm_pages = {p: normalize(t) for p, t in pages.items()}
-    norm_all = "".join(norm_pages.values())
+    norm_all = "".join(normalize(t) for t in pages.values())
     seen = [normalize(s) for s in exclude_stems]
+    done: set[int] = set()
     accepted, rejected = [], {"schema": 0, "evidence": 0, "duplicate": 0}
 
     for d in drafts:
-        reason, question = _check_one(d, qtype, difficulty, norm_pages, norm_all, rng)
+        point = points.get(d.point)
+        if point is None:
+            reason, question = "schema", None
+        else:
+            reason, question = _check_one(d, qtype, difficulty, point, norm_all, rng)
         if reason is None:
             stem = normalize(d.stem)
-            if any(stem == s or difflib.SequenceMatcher(None, stem, s).ratio() >= SIMILAR for s in seen):
+            if d.point in done or _similar(stem, seen):
                 reason = "duplicate"
             else:
                 seen.append(stem)
-                accepted.append(question)
+                done.add(d.point)
+                accepted.append({**question, "point": d.point})
                 continue
         rejected[reason] += 1
     return accepted, rejected
 
 
-def _check_one(d, qtype, difficulty, norm_pages, norm_all, rng) -> tuple[str | None, dict | None]:
+def _choice_key(choice: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", choice).lower())
+
+
+def _similar(text: str, others: list[str]) -> bool:
+    return any(text == o or difflib.SequenceMatcher(None, text, o).ratio() >= SIMILAR for o in others)
+
+
+def _check_one(d, qtype, difficulty, point: Point, norm_all, rng) -> tuple[str | None, dict | None]:
     if not d.stem.strip() or len(d.stem) > MAX_STEM or META_STEM.search(d.stem):
         return "schema", None
     if not d.explanation.strip() or len(d.explanation) > MAX_EXPLANATION:
         return "schema", None
-    if d.source_page not in norm_pages:
-        return "schema", None
-    page = _evidence_page(d.evidence_quote, d.source_page, norm_pages)
-    if page is None:
-        return "evidence", None
 
     question = {
         "type": qtype,
@@ -148,17 +222,17 @@ def _check_one(d, qtype, difficulty, norm_pages, norm_all, rng) -> tuple[str | N
         "acceptedAnswers": [],
         "rubric": [],
         "explanation": d.explanation.strip(),
-        "sourcePage": page,
-        "evidenceQuote": d.evidence_quote.strip(),
+        "sourcePage": point.source_page,
+        "evidenceQuote": point.evidence_quote.strip(),
         "conceptTags": [t.strip() for t in d.concept_tags if t.strip() and len(t.strip()) <= MAX_TAG][:MAX_TAGS],
     }
-
     match d:
         case OXDraft():
             question["answer"] = d.answer
         case MCDraft():
             options = [d.correct_choice.strip(), *(w.strip() for w in d.wrong_choices)]
-            if len(options) != 4 or not all(options) or len({normalize(o) for o in options}) != 4:
+            # 코드 결과 보기("plain"과 "<<plain>>")는 기호로만 다르므로 기호를 지우지 않고 비교한다
+            if len(options) != 4 or not all(options) or len({_choice_key(o) for o in options}) != 4:
                 return "schema", None
             if any(_BANNED_CHOICE.search(o) for o in options):
                 return "schema", None

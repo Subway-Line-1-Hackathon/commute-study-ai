@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 from pydantic.alias_generators import to_camel
 
-FileType = Literal["PDF", "PPT", "PNG"]
+FileType = Literal["PDF", "PPT", "PNG", "JPG"]
 Kind = Literal["LECTURE", "PAST_EXAM"]
 QuestionType = Literal["OX", "MC", "SHORT", "ESSAY"]
 Difficulty = Literal[1, 2, 3]
@@ -36,8 +36,8 @@ class ProcessMaterialRequest(Model):
     file_urls: list[HttpUrl] = Field(min_length=1, max_length=20)
 
     @model_validator(mode="after")
-    def one_url_unless_png(self):
-        if self.file_type != "PNG" and len(self.file_urls) != 1:
+    def one_url_unless_image(self):
+        if self.file_type in ("PDF", "PPT") and len(self.file_urls) != 1:
             raise ValueError("PDF·PPT는 fileUrls가 1개여야 한다")
         return self
 
@@ -124,11 +124,24 @@ class CategoriesOut(BaseModel):
     categories: list[CategoryDraft]
 
 
-class QuestionBase(BaseModel):
-    stem: str
-    explanation: str
+class Point(BaseModel):
+    """출제 포인트. 학생이 확인해야 할 사실 하나와 그 근거."""
+
+    statement: str
     source_page: int
     evidence_quote: str
+    importance: Literal["core", "minor"]
+    types: list[Literal["OX", "MC", "SHORT"]]
+
+
+class PlanOut(BaseModel):
+    points: list[Point]
+
+
+class QuestionBase(BaseModel):
+    point: int  # 출제 포인트 번호. 쪽과 근거는 코드가 포인트에서 붙인다
+    stem: str
+    explanation: str
     concept_tags: list[str]
 
 
