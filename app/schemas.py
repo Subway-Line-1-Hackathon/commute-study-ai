@@ -128,6 +128,7 @@ class Point(BaseModel):
     """출제 포인트. 학생이 확인해야 할 사실 하나와 그 근거."""
 
     statement: str
+    concept: str  # 같은 개념의 포인트끼리 같은 이름. 한 개념에 문제가 몰리지 않게 센다
     source_page: int
     evidence_quote: str
     importance: Literal["core", "minor"]

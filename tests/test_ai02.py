@@ -39,6 +39,7 @@ def points(n: int, importance="core", types=("OX", "MC", "SHORT"), start=0) -> l
     return [
         Point(
             statement=_word(1000 + start + i) + " 사실",
+            concept=_word(1000 + start + i),
             source_page=3 if i % 2 == 0 else 4,
             evidence_quote=QUOTE if i % 2 == 0 else QUEUE,
             importance=importance,
@@ -109,7 +110,7 @@ def test_plan_then_one_question_per_assigned_point(fake):
     out = run(request(("OX", 2, 3), ("MC", 3, 2)))
     assert [(q["type"], q["difficulty"]) for q in out["questions"]] == [("OX", 2)] * 3 + [("MC", 3)] * 2
     assert out["shortfall"] == []
-    assert out["capacity"] == 12  # core 6개 × 요청한 2유형
+    assert out["capacity"] == 12  # core 6개 × 2문제
     assert out["rejected"] == {"schema": 0, "evidence": 0, "duplicate": 0}
     assert calls[0]["type"] == "PLAN"
     assert sorted(len(c["points"]) for c in gen_calls(calls)) == [2, 3]
@@ -126,9 +127,9 @@ def test_page_and_evidence_come_from_the_point(fake):
 def test_small_material_returns_capacity_and_shortfall(fake):
     fake(plan=points(2) + points(3, importance="minor", types=("OX",), start=2))
     out = run(request(("OX", 2, 14), ("MC", 2, 13), ("SHORT", 2, 13)))
-    assert out["capacity"] == 2 * 3 + 3
-    assert len(out["questions"]) == 9
-    assert sum(s["count"] for s in out["shortfall"]) == 40 - 9
+    assert out["capacity"] == 2 * 2 + 3
+    assert len(out["questions"]) == 7
+    assert sum(s["count"] for s in out["shortfall"]) == 40 - 7
 
 
 def test_large_assignment_is_split_into_chunks(fake):

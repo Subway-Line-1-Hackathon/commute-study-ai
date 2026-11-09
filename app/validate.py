@@ -77,7 +77,7 @@ MAX_STEM = 300
 META_STEM = re.compile(
     r"(자료|슬라이드|목차|강의)(에서는|에서|에는|에|는|의|가)\s"
     r"|(라고|다고) (설명|적혀|제시|표현|소개|강조)"
-    r"|제목|항목에는|항목의"
+    r"|제목에|항목에는|항목의"  # '제목' 자체는 HTML heading 같은 개념이라 거르지 않는다
     r"|표현이 (나온|등장|쓰|있)"
     r"|\d+\s*/\s*\d+\s*(로|으로)?\s*표시"
 )
@@ -98,7 +98,10 @@ def normalize(text: str) -> str:
 
 
 MAX_QUESTIONS = 40
-POINT_QUESTIONS = {"core": 3, "minor": 1}  # 포인트 하나로 낼 수 있는 최대 문제 수 (docs/AI-02_출제_재설계.md 2장)
+# 포인트 하나로 낼 수 있는 최대 문제 수. 3이면 같은 사실을 유형만 바꿔 묻는 반복이 많았다 (eval/결과.md 11-10).
+POINT_QUESTIONS = {"core": 2, "minor": 1}
+CONCEPT_QUESTIONS = 4  # 한 개념의 최대 문제 수. 포인트를 잘게 나누면 한 개념에 문제가 몰린다 (DOCTYPE 9문제)
+MIN_LEAK = 3  # 정답이 이 글자 수 이상이고 지문에 그대로 있으면 정답이 드러난 문제다
 
 
 def check_points(points: list[Point], pages: dict[int, str]) -> list[Point]:
@@ -119,7 +122,8 @@ def check_points(points: list[Point], pages: dict[int, str]) -> list[Point]:
 
 
 def capacity(points: list[Point], types=("OX", "MC", "SHORT")) -> int:
-    """이 포인트들로 해당 유형의 문제를 최대 몇 개 낼 수 있는지. core는 고른 유형마다 하나(최대 3), minor는 하나."""
+    """이 포인트들로 해당 유형의 문제를 최대 몇 개 낼 수 있는지. core는 고른 유형마다 하나(최대 2), minor는 하나.
+    한 개념은 CONCEPT_QUESTIONS까지."""
     specs = [QuestionSpec(type=t, difficulty=2, count=MAX_QUESTIONS) for t in dict.fromkeys(types)]
     return sum(map(len, assign_points(points, specs, MAX_QUESTIONS)))
 
@@ -129,9 +133,10 @@ def assign_points(points: list[Point], specs: list[QuestionSpec], budget: int) -
 
     요청 비율대로 배정하되 포인트가 고른 유형 안에서만 배정한다. 어떤 유형의 포인트가 모자라면 남은 몫을
     다른 항목이 요청 수를 넘겨 채운다. 같은 포인트를 같은 유형으로 두 번 쓰지 않고, 덜 쓴 포인트와 core 포인트를
-    먼저 쓴다. 서술형은 core 포인트로만 낸다.
+    먼저 쓴다. 한 개념에는 CONCEPT_QUESTIONS까지만 배정한다. 서술형은 core 포인트로만 낸다.
     """
     used: Counter[int] = Counter()
+    per_concept: Counter[str] = Counter()
     taken: set[tuple[int, str]] = set()
     out: list[list[int]] = [[] for _ in specs]
     for capped in (True, False):
@@ -145,6 +150,7 @@ def assign_points(points: list[Point], specs: list[QuestionSpec], budget: int) -
                 for n, p in enumerate(points, 1)
                 if (n, qtype) not in taken
                 and used[n] < POINT_QUESTIONS[p.importance]
+                and per_concept[_concept(p)] < CONCEPT_QUESTIONS
                 and (qtype in p.types or (qtype == "ESSAY" and p.importance == "core"))
             ]
             if not candidates:
@@ -152,12 +158,17 @@ def assign_points(points: list[Point], specs: list[QuestionSpec], budget: int) -
                 continue
             n = min(candidates, key=lambda n: (used[n], points[n - 1].importance != "core", n))
             used[n] += 1
+            per_concept[_concept(points[n - 1])] += 1
             taken.add((n, qtype))
             out[i].append(n)
             budget -= 1
             if capped and len(out[i]) >= specs[i].count:
                 open_specs.discard(i)
     return out
+
+
+def _concept(p: Point) -> str:
+    return normalize(p.concept) or normalize(p.statement)
 
 
 def check_questions(
@@ -199,6 +210,13 @@ def check_questions(
     return accepted, rejected
 
 
+def _leaks(answer: str, stem: str) -> bool:
+    """정답이 지문에 그대로 있는지. 짧은 정답(p, 4)은 우연히 겹치므로 보지 않는다.
+    기호를 지우지 않고 비교한다. 지우면 정답 <html>이 지문의 'HTML 요소'와 겹친다."""
+    key = _choice_key(answer)
+    return len(normalize(answer)) >= MIN_LEAK and key in _choice_key(stem)
+
+
 def _choice_key(choice: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", choice).lower())
 
@@ -234,14 +252,14 @@ def _check_one(d, qtype, difficulty, point: Point, norm_all, rng) -> tuple[str |
             # 코드 결과 보기("plain"과 "<<plain>>")는 기호로만 다르므로 기호를 지우지 않고 비교한다
             if len(options) != 4 or not all(options) or len({_choice_key(o) for o in options}) != 4:
                 return "schema", None
-            if any(_BANNED_CHOICE.search(o) for o in options):
+            if any(_BANNED_CHOICE.search(o) for o in options) or _leaks(options[0], d.stem):
                 return "schema", None
             # LLM은 정답을 특정 위치에 몰아 두는 경향이 있어 섞는 일은 코드가 한다.
             question["choices"] = rng.sample(options, 4)
             question["answer"] = str(question["choices"].index(options[0]) + 1)
         case ShortDraft():
             answer = d.answer.strip()
-            if not answer or len(answer) > MAX_SHORT_ANSWER:
+            if not answer or len(answer) > MAX_SHORT_ANSWER or _leaks(answer, d.stem):
                 return "schema", None
             if normalize(answer) not in norm_all:  # 정답 용어가 자료에 없으면 자료 밖 문제다
                 return "evidence", None
