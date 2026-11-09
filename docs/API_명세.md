@@ -5,6 +5,8 @@
 - 기준: 기능명세서 5장 AI-01~06 (2026-11-05 저장본), 백엔드 초기 스키마 `V1__init_schema.sql` (`Feat/#3` 브랜치, `develop` 머지 전)
 - 기능정의서 (3)~(7)과 백엔드 개발 명세서를 아직 못 봐서 필드가 바뀔 수 있다.
 
+**v0.4 이후 추가 (11-10):** AI-01 `fileType`에 `JPG` 추가. 사진 요청에는 PNG·JPG를 섞어도 된다. 기존 요청은 그대로 동작한다.
+
 **v0.3에서 바뀐 것 (11-07 팀 결정: 단원당 문제 수를 고정하지 않는다):**
 
 | 항목 | v0.3 | v0.4 | 백엔드 영향 |
@@ -69,13 +71,13 @@ AI 서버 시도 횟수에는 OpenAI 서버 오류(5xx)·연결 오류의 즉시
 | 400 | `INVALID_REQUEST` | 요청 형식 오류 | 호출 코드 수정 |
 | 401 | `UNAUTHORIZED` | 내부 키 오류 | 환경변수 확인 |
 | 422 | `UNSUPPORTED_FILE` | 열 수 없거나 지원하지 않는 파일 (구버전 .ppt 포함) | `FAILED`, 재시도 무의미 |
-| 422 | `PAGE_LIMIT_EXCEEDED` | PDF·PPT 100쪽, PNG 20장 초과 | `FAILED`. 기능명세서는 용량 초과를 업로드 단계에서 거부하므로 확인 필요 (10장) |
+| 422 | `PAGE_LIMIT_EXCEEDED` | PDF·PPT 100쪽, 사진(PNG·JPG) 20장 초과 | `FAILED`. 기능명세서는 용량 초과를 업로드 단계에서 거부하므로 확인 필요 (10장) |
 | 422 | `TEXT_EXTRACTION_FAILED` | 텍스트 인식 실패 | `FAILED`, 재시도 무의미 |
 | 502 | `FILE_FETCH_FAILED` | 파일 URL 다운로드 실패 | 서명 URL을 새로 만들어 재시도 가능 |
 | 502 | `LLM_FAILED` | AI 응답 오류. 호출 목록의 시도 횟수를 다 쓴 뒤 반환 | 기능별 실패 처리 |
 | 504 | `LLM_TIMEOUT` | 서버 시간 상한 초과 | 기능별 실패 처리 |
 
-파일 크기 30MB 초과와 PNG 20장 초과는 M1대로 백엔드가 업로드 단계에서 거부한다. PDF·PPT 쪽수는 파일을 열어야 알 수 있다. 백엔드가 업로드 때 확인하지 않으면 AI 서버가 `PAGE_LIMIT_EXCEEDED`로 돌려준다. AI 서버는 어느 쪽이든 쪽수를 다시 확인한다.
+파일 크기 30MB 초과와 사진 20장 초과는 M1대로 백엔드가 업로드 단계에서 거부한다. PDF·PPT 쪽수는 파일을 열어야 알 수 있다. 백엔드가 업로드 때 확인하지 않으면 AI 서버가 `PAGE_LIMIT_EXCEEDED`로 돌려준다. AI 서버는 어느 쪽이든 쪽수를 다시 확인한다.
 
 ### 공통 타입
 
@@ -86,13 +88,13 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 
 | 필드 | 값 | 백엔드 스키마 |
 | --- | --- | --- |
-| `fileType` | `PDF` \| `PPT` \| `PNG` | `material_file_type` |
+| `fileType` | `PDF` \| `PPT` \| `PNG` \| `JPG` | `material_file_type`. `JPG`는 11-10에 추가했다. 백엔드 enum에도 더해야 한다 |
 | `kind` | `LECTURE` \| `PAST_EXAM` | `material_kind` |
 | `type` | `OX` \| `MC` \| `SHORT` \| `ESSAY` | `question_type` |
 | `difficulty` | `1`(하) \| `2`(중) \| `3`(상) | `question.difficulty` |
 | `mode` | `CURRICULUM` \| `REVIEW` | `session_mode` |
 
-- 쪽 번호는 PDF 뷰어 기준이고 1부터 시작한다. PPT는 슬라이드 번호, PNG는 업로드 순서를 쓴다.
+- 쪽 번호는 PDF 뷰어 기준이고 1부터 시작한다. PPT는 슬라이드 번호, 사진(PNG·JPG)은 업로드 순서를 쓴다.
 - `PPT`는 .pptx만 처리한다. 구버전 .ppt는 읽을 라이브러리가 없어서 `UNSUPPORTED_FILE`이다.
 
 ---
@@ -111,7 +113,7 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 }
 ```
 
-- `fileUrls`: PDF·PPT는 1개, PNG는 최대 20개를 쪽 순서대로 보낸다.
+- `fileUrls`: PDF·PPT는 1개, 사진(PNG·JPG)은 최대 20개를 쪽 순서대로 보낸다. 사진 요청에는 PNG와 JPG를 섞어 보내도 된다. `fileType`은 많은 쪽을 쓰면 되고, AI 서버는 파일 내용으로 형식을 확인한다. 폰 사진의 회전 정보(EXIF)는 AI 서버가 반영한다. iPhone의 HEIC는 받지 않으므로 앱에서 JPG로 바꿔 올린다.
 - `kind`: `PAST_EXAM`(족보)도 MVP에서는 `LECTURE`와 같이 단원화한다. 족보로 문제를 만드는 방식이 정해지면 바꾼다.
 
 **응답 200**

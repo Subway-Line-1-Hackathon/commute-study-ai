@@ -120,6 +120,16 @@ def test_png_pages_all_need_ocr():
     assert [(p.page, p.needs_ocr) for p in pages] == [(1, True), (2, True)]
 
 
+JPG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
+
+
+def test_jpg_and_mixed_images_need_ocr():
+    assert [p.needs_ocr for p in extract([JPG, PNG], "JPG")] == [True, True]
+    assert len(extract([PNG, JPG], "PNG")) == 2
+    assert error_code(lambda: extract([JPG] * 21, "JPG")) == "PAGE_LIMIT_EXCEEDED"
+    assert error_code(lambda: extract([JPG, make_pdf([LONG])], "JPG")) == "UNSUPPORTED_FILE"
+
+
 def test_png_limit_and_type():
     assert error_code(lambda: extract([PNG] * 21, "PNG")) == "PAGE_LIMIT_EXCEEDED"
     assert error_code(lambda: extract([PNG, make_pdf([LONG])], "PNG")) == "UNSUPPORTED_FILE"
