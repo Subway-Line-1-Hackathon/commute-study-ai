@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import logging
 from collections import Counter
 from collections.abc import AsyncIterator
 import os
@@ -30,6 +31,7 @@ from app.schemas import (
 )
 from app.validate import InvalidOutput, assign_points, capacity, check_points, check_questions, fix_categories, normalize
 
+log = logging.getLogger("pipelines")
 PROMPTS = Path(__file__).parent / "prompts"
 OCR_PROMPT = (PROMPTS / "OCR.md").read_text(encoding="utf-8")
 AI01_PROMPT = (PROMPTS / "AI-01.md").read_text(encoding="utf-8")
@@ -213,8 +215,10 @@ async def generate_questions(req: GenerateQuestionsRequest, rng: random.Random |
     rng = rng or random.Random()
 
     points = await _plan(req, pages, document, deadline, usage)
-    # 추가 생성이면 이미 있는 문제만큼 덜 만든다. 어느 포인트를 썼는지는 모르니 중복 검사로 거른다.
-    limit = capacity(points, [s.type for s in req.requests])
+    # capacity는 요청 유형과 상관없는 단원 전체 수다. 백엔드가 유형별로 따로 요청해도 같은 값을 받는다.
+    limit = capacity(points, dict.fromkeys(["OX", "MC", "SHORT", *(s.type for s in req.requests)]))
+    # 이미 있는 문제는 유형을 모르므로 단원 전체 수에서만 뺀다. 같은 문제는 중복 검사로 거른다.
+    # (요청 유형의 capacity에서 빼면, 단답만 추가로 요청할 때 O/X·객관식 수까지 빠져 0개가 됐다. #49)
     budget = min(sum(s.count for s in req.requests), limit - len(req.exclude_stems))
     assigned = assign_points(points, req.requests, budget)
     results = await asyncio.gather(
@@ -231,6 +235,19 @@ async def generate_questions(req: GenerateQuestionsRequest, rng: random.Random |
         for s, qs in zip(req.requests, results)
         if len(qs) < s.count
     ]
+    log.info(
+        "AI02 category=%s points=%d capacity=%d existing=%d %s rejected=%s %dms",
+        req.category.category_id,
+        len(points),
+        limit,
+        len(req.exclude_stems),
+        " ".join(
+            f"{s.type}/{s.difficulty}:요청{s.count}·배정{len(nums)}·생성{len(qs)}"
+            for s, nums, qs in zip(req.requests, assigned, results)
+        ),
+        rejected,
+        usage.meta()["elapsedMs"],
+    )
     return {"questions": questions, "shortfall": shortfall, "capacity": limit, "rejected": rejected, "meta": usage.meta()}
 
 

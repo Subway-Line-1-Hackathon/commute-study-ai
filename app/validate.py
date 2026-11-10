@@ -122,8 +122,8 @@ def check_points(points: list[Point], pages: dict[int, str]) -> list[Point]:
 
 
 def capacity(points: list[Point], types=("OX", "MC", "SHORT")) -> int:
-    """이 포인트들로 해당 유형의 문제를 최대 몇 개 낼 수 있는지. core는 고른 유형마다 하나(최대 2), minor는 하나.
-    한 개념은 CONCEPT_QUESTIONS까지."""
+    """이 포인트들로 해당 유형들의 문제를 모두 합쳐 최대 몇 개 낼 수 있는지. core는 고른 유형마다 하나(최대 2),
+    minor는 하나. 한 개념은 CONCEPT_QUESTIONS까지."""
     specs = [QuestionSpec(type=t, difficulty=2, count=MAX_QUESTIONS) for t in dict.fromkeys(types)]
     return sum(map(len, assign_points(points, specs, MAX_QUESTIONS)))
 
