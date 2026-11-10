@@ -155,9 +155,9 @@ def test_regeneration_excludes_existing_stems(fake):
 
 def test_additional_generation_stops_at_capacity(fake):
     calls = fake()
-    out = run(request(("OX", 2, 5), exclude=[f"기존 {i}" for i in range(6)]))
+    out = run(request(("OX", 2, 5), exclude=[f"기존 {i}" for i in range(12)]))
     assert out["questions"] == []
-    assert out["capacity"] == 6  # core 6개 × O/X
+    assert out["capacity"] == 12  # core 6개 × 2문제, 요청 유형과 상관없는 단원 전체 수
     assert out["shortfall"] == [{"type": "OX", "difficulty": 2, "count": 5}]
     assert gen_calls(calls) == []
 
@@ -173,8 +173,17 @@ def test_capacity_counts_only_what_the_requested_types_can_use(fake):
 def test_nothing_assignable_is_empty_not_failed(fake):
     calls = fake(plan=points(4, types=("OX",)))
     out = run(request(("SHORT", 2, 3)))
-    assert (out["questions"], out["capacity"]) == ([], 0)
+    assert (out["questions"], out["capacity"]) == ([], 4)
     assert gen_calls(calls) == []
+
+
+def test_short_only_extra_request_is_not_blocked_by_other_types(fake):
+    # 백엔드는 O/X·객관식 20문제가 있는 단원에 단답 10개만 추가로 요청한다 (commute-study-backend#65)
+    fake(plan=points(15))
+    out = run(request(("SHORT", 2, 10), exclude=[f"기존 {i}" for i in range(20)]))
+    assert out["capacity"] == 30
+    assert [q["type"] for q in out["questions"]] == ["SHORT"] * 10
+    assert out["shortfall"] == []
 
 
 def test_persistent_failure_reports_shortfall(fake):

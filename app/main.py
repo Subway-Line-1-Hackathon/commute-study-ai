@@ -54,6 +54,8 @@ def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# uvicorn은 앱 로거 수준을 정하지 않아 INFO 로그가 버려진다. 호출·생성 결과 로그를 Railway에 남긴다.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 log = logging.getLogger("main")
 app = FastAPI(title="commute-study-ai")
 v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_key)])
