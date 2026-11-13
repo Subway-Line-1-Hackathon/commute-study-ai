@@ -69,6 +69,27 @@ def fix_categories(drafts: list[CategoryDraft], page_lengths: list[int]) -> list
     return [{"order": i, **c} for i, c in enumerate(cats, 1)]
 
 
+MAX_ISSUES = 10
+MAX_ISSUE_TEXT = 200
+
+
+def check_issues(drafts, pages: dict[int, str]) -> list[dict]:
+    """원문이 그 쪽에 실제로 있는 지적만 API 응답 형태로 남긴다. 같은 원문을 두 번 지적하지 않는다."""
+    norm_pages = {p: normalize(t) for p, t in pages.items()}
+    out, seen = [], set()
+    for d in drafts:
+        if d.level != "wrong":  # 단순화·예외를 틀렸다고 알리면 학생이 자료를 불신한다 (eval/결과.md 11-13)
+            continue
+        quote, key = d.quote.strip(), normalize(d.quote)
+        if len(key) < MIN_QUOTE or key not in norm_pages.get(d.page, "") or key in seen:
+            continue
+        if not (0 < len(d.problem.strip()) <= MAX_ISSUE_TEXT and 0 < len(d.correction.strip()) <= MAX_ISSUE_TEXT):
+            continue
+        seen.add(key)
+        out.append({"page": d.page, "quote": quote, "problem": d.problem.strip(), "correction": d.correction.strip()})
+    return out[:MAX_ISSUES]
+
+
 MAX_NOTE_UNITS = 3  # 필기 한 쪽이 붙을 수 있는 최대 단원 수
 
 
