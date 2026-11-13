@@ -22,6 +22,7 @@ from app.schemas import (
     GenerateQuestionsRequest,
     JudgeOut,
     JudgeShortRequest,
+    IssuesOut,
     OcrText,
     PlanOut,
     Point,
@@ -29,13 +30,14 @@ from app.schemas import (
     QuestionSpec,
     TutorAskRequest,
 )
-from app.validate import InvalidOutput, assign_points, attach_notes, capacity, check_points, check_questions, fix_categories, normalize
+from app.validate import InvalidOutput, assign_points, attach_notes, check_issues, capacity, check_points, check_questions, fix_categories, normalize
 
 log = logging.getLogger("pipelines")
 PROMPTS = Path(__file__).parent / "prompts"
 OCR_PROMPT = (PROMPTS / "OCR.md").read_text(encoding="utf-8")
 OCR_NOTE_PROMPT = (PROMPTS / "OCR-NOTE.md").read_text(encoding="utf-8")
 AI01_PROMPT = (PROMPTS / "AI-01.md").read_text(encoding="utf-8")
+AI01_CHECK_PROMPT = (PROMPTS / "AI-01-CHECK.md").read_text(encoding="utf-8")
 AI02_PROMPT = (PROMPTS / "AI-02.md").read_text(encoding="utf-8")
 AI02_PLAN_PROMPT = (PROMPTS / "AI-02-PLAN.md").read_text(encoding="utf-8")
 AI03_PROMPT = (PROMPTS / "AI-03.md").read_text(encoding="utf-8")
@@ -50,6 +52,7 @@ AI01_SECONDS = 270  # API 명세의 서버 시간 상한
 AI01_ATTEMPTS = 2
 AI01_MIN_RETRY_SECONDS = 60  # 남은 시간이 이보다 적으면 단원화를 다시 하지 않는다
 AI01_MAX_OUTPUT = 16000
+AI01_CHECK_MAX_OUTPUT = 4000
 
 # 추가 생성이 60초 이내여야 한다(기능명세서 5장). 요청만으로 사전 생성과 구분할 수 없어 둘 다 55초다.
 # 출제 계획(포인트 추출) → 코드 배정 → 포인트당 문제 하나 (docs/AI-02_출제_재설계.md).
@@ -101,12 +104,16 @@ async def process_files(files: list[bytes], file_type: str, deadline: llm.Deadli
     if sum(len(p.text) for p in pages + note_pages) < MIN_TOTAL_CHARS:
         raise AIError("TEXT_EXTRACTION_FAILED")
 
-    categories = await _categorize(pages, note_pages, deadline, usage)
+    document = _document(pages, note_pages)
+    categories, issues = await asyncio.gather(
+        _categorize(pages, note_pages, document, deadline, usage), _check_concepts(pages + note_pages, document, deadline, usage)
+    )
     return {
         "pageCount": len(pages) + len(note_pages),
         "pages": [{"page": p.page, "text": p.text} for p in pages + note_pages],
         "notePages": [p.page for p in note_pages],
         "categories": categories,
+        "issues": issues,
         "meta": usage.meta(),
     }
 
@@ -182,12 +189,35 @@ def _data_url(jpeg: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
 
 
-async def _categorize(pages, note_pages, deadline, usage) -> list[dict]:
-    document = "\n".join(f'<page n="{p.page}">\n{p.text}\n</page>' for p in pages)
-    notes = "\n".join(
-        f'<note n="{p.page}" label="필기 {p.page - len(pages)}쪽">\n{p.text}\n</note>' for p in note_pages
-    )
-    base_input = f"강의자료 총 {len(pages)}쪽, 필기 {len(note_pages)}쪽\n<document>\n{document}\n{notes}\n</document>"
+def _document(pages, note_pages) -> str:
+    lecture = "\n".join(f'<page n="{p.page}">\n{p.text}\n</page>' for p in pages)
+    notes = "\n".join(f'<note n="{p.page}" label="필기 {p.page - len(pages)}쪽">\n{p.text}\n</note>' for p in note_pages)
+    return f"강의자료 총 {len(pages)}쪽, 필기 {len(note_pages)}쪽\n<document>\n{lecture}\n{notes}\n</document>"
+
+
+async def _check_concepts(all_pages, document, deadline, usage) -> list[dict]:
+    """자료·필기에서 명백히 틀린 내용을 찾는다 (11-07 팀 결정). 점검은 보조 기능이라 실패해도 단원화를 막지 않는다."""
+    try:
+        out = await llm.parse(
+            "AI01_CHECK",
+            instructions=AI01_CHECK_PROMPT,
+            input=document,
+            schema=IssuesOut,
+            deadline=deadline,
+            usage=usage,
+            max_output_tokens=AI01_CHECK_MAX_OUTPUT,
+            count_attempt=False,
+        )
+    except AIError as e:
+        log.warning("AI01_CHECK 실패, issues 없이 진행: %s", e.code)
+        return []
+    issues = check_issues(out.issues, {p.page: p.text for p in all_pages})
+    log.info("AI01_CHECK issues=%d (모델 %d개 중 원문 확인)", len(issues), len(out.issues))
+    return issues
+
+
+async def _categorize(pages, note_pages, document, deadline, usage) -> list[dict]:
+    base_input = document
     lengths = [len(p.text) for p in pages]
     note, error = "", AIError("LLM_FAILED")
 

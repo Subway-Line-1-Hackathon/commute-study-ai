@@ -41,6 +41,8 @@ async def run(name: str, files: list[bytes], file_type: str, notes: list[bytes] 
           f"토큰 {meta['inputTokens']}/{meta['outputTokens']}, 약 ${cost:.3f} 이하")
     for c in out["categories"]:
         print(f"  {c['order']:>2}. {c['pageStart']:>3}~{c['pageEnd']:<3}쪽  {c['name']}  필기 {c.get('notePages', [])}")
+    for i in out.get("issues", []):
+        print(f"  [틀린 개념] {i['page']}쪽 \"{i['quote']}\" → {i['problem']} / {i['correction']}")
 
 
 async def main(args: list[str]):
@@ -54,7 +56,7 @@ async def main(args: list[str]):
         name = path.name + (f"+필기{len(notes)}" if notes else "")
         await run(name, [path.read_bytes()], TYPES.get(path.suffix.lower(), "PDF"), notes)
     if pngs:
-        await run(f"{pngs[0].stem}_외_{len(pngs) - 1}장", [p.read_bytes() for p in pngs], "PNG")
+        await run(f"{pngs[0].stem}_외_{len(pngs) - 1}장", [p.read_bytes() for p in pngs], "PNG", notes)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from test_extract import make_pdf
 
 from app import extract, llm, main, pipelines, validate
 from app.errors import AIError
-from app.schemas import CategoriesOut, CategoryDraft, NoteDraft, OcrText, ProcessMaterialRequest
+from app.schemas import CategoriesOut, CategoryDraft, IssueDraft, IssuesOut, NoteDraft, OcrText, ProcessMaterialRequest
 
 LINE = "Stack is a LIFO structure and queue is a FIFO structure used in many algorithms"  # 80자
 HOST = "x.supabase.co"
@@ -39,13 +39,17 @@ def categories(*starts, notes=()) -> CategoriesOut:
 
 @pytest.fixture
 def fake(monkeypatch):
-    """llm.parse를 기능별 응답 목록으로 바꾼다. 목록의 예외는 그대로 던진다."""
+    """llm.parse를 기능별 응답 목록으로 바꾼다. 목록의 예외는 그대로 던진다.
+    틀린 개념 점검(AI01_CHECK)은 따로 주지 않으면 빈 결과를 내고 calls에 남기지 않는다."""
 
     def install(files: list[bytes], **answers):
         calls = []
+        check_given = "AI01_CHECK" in answers
+        answers.setdefault("AI01_CHECK", [IssuesOut(issues=[])])
 
         async def parse(feature, *, usage, count_attempt=True, **kwargs):
-            calls.append((feature, kwargs))
+            if feature != "AI01_CHECK" or check_given:
+                calls.append((feature, kwargs))
             if count_attempt:
                 usage.attempts += 1
             usage.input_tokens += 10
@@ -87,6 +91,40 @@ def test_text_pdf_is_split_into_categories(fake, monkeypatch):
     assert [f for f, _ in calls] == ["AI01"]
     assert '<page n="10">' in calls[0][1]["input"]
     assert out["notePages"] == [] and all(c["notePages"] == [] for c in out["categories"])
+    assert out["issues"] == []
+
+
+def issue(page, quote, problem="거꾸로 썼어요.", correction="바르게는 이래요.", level="wrong"):
+    return IssueDraft(level=level, page=page, quote=quote, problem=problem, correction=correction)
+
+
+def test_wrong_concepts_are_reported_with_quotes_found_in_material(fake):
+    wrong = "Stack is a LIFO structure and queue is a FIFO structure"
+    calls = fake(
+        [make_pdf([LINE] * 10)],
+        AI01=[categories(1)],
+        AI01_CHECK=[
+            IssuesOut(
+                issues=[
+                    issue(3, wrong),
+                    issue(4, "자료에 없는 문장을 틀렸다고 한다"),
+                    issue(5, "Stack"),
+                    issue(6, wrong, level="nuance"),  # 단순화·예외는 알리지 않는다
+                ]
+            )
+        ],
+    )
+    out = run()
+    assert out["issues"] == [{"page": 3, "quote": wrong, "problem": "거꾸로 썼어요.", "correction": "바르게는 이래요."}]
+    check = next(kw for f, kw in calls if f == "AI01_CHECK")
+    assert '<page n="10">' in check["input"]
+    assert out["meta"]["attempts"] == 1  # 점검 호출은 시도 횟수에 세지 않는다
+
+
+def test_check_failure_does_not_block_material(fake):
+    fake([make_pdf([LINE] * 10)], AI01=[categories(1)], AI01_CHECK=[AIError("LLM_TIMEOUT")])
+    out = run()
+    assert out["issues"] == [] and len(out["categories"]) == 1
 
 
 def test_notes_follow_lecture_pages_and_join_related_unit(fake, monkeypatch):
