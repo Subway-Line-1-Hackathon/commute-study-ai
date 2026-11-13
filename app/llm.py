@@ -23,6 +23,7 @@ log = logging.getLogger("llm")
 # AI02는 V3에서 luna·terra·sol을 비교해 정한다.
 _DEFAULTS = {
     "OCR": ("gpt-6-luna", "none"),
+    "OCR_NOTE": ("gpt-6-luna", "none"),  # 손글씨 필기
     "AI01": ("gpt-6.1-terra", "low"),
     "AI02": ("gpt-6.1-terra", "low"),
     "AI03": ("gpt-6-luna", "none"),

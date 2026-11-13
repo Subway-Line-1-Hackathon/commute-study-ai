@@ -29,11 +29,12 @@ from app.schemas import (
     QuestionSpec,
     TutorAskRequest,
 )
-from app.validate import InvalidOutput, assign_points, capacity, check_points, check_questions, fix_categories, normalize
+from app.validate import InvalidOutput, assign_points, attach_notes, capacity, check_points, check_questions, fix_categories, normalize
 
 log = logging.getLogger("pipelines")
 PROMPTS = Path(__file__).parent / "prompts"
 OCR_PROMPT = (PROMPTS / "OCR.md").read_text(encoding="utf-8")
+OCR_NOTE_PROMPT = (PROMPTS / "OCR-NOTE.md").read_text(encoding="utf-8")
 AI01_PROMPT = (PROMPTS / "AI-01.md").read_text(encoding="utf-8")
 AI02_PROMPT = (PROMPTS / "AI-02.md").read_text(encoding="utf-8")
 AI02_PLAN_PROMPT = (PROMPTS / "AI-02-PLAN.md").read_text(encoding="utf-8")
@@ -81,22 +82,30 @@ OCR_MAX_OUTPUT = 4000
 
 async def process_material(req: ProcessMaterialRequest) -> dict:
     deadline = llm.Deadline(AI01_SECONDS)
-    files = await download([str(u) for u in req.file_urls], deadline)
-    return await process_files(files, req.file_type, deadline)
+    urls = [str(u) for u in req.file_urls]
+    files = await download(urls + [str(u) for u in req.note_urls], deadline)
+    return await process_files(files[: len(urls)], req.file_type, deadline, notes=files[len(urls) :])
 
 
-async def process_files(files: list[bytes], file_type: str, deadline: llm.Deadline) -> dict:
-    """다운로드 다음 단계. eval 스크립트가 로컬 파일로 직접 부른다."""
+async def process_files(files: list[bytes], file_type: str, deadline: llm.Deadline, notes: list[bytes] = ()) -> dict:
+    """다운로드 다음 단계. eval 스크립트가 로컬 파일로 직접 부른다. notes는 필기 사진이다."""
     usage = llm.Usage(model=llm.MODELS["AI01"])
     pages = await asyncio.to_thread(extract.extract, files, file_type)
-    await _ocr(pages, files, file_type, deadline, usage)
-    if sum(len(p.text) for p in pages) < MIN_TOTAL_CHARS:
+    note_pages = await asyncio.to_thread(extract.extract, list(notes), "JPG") if notes else []
+    await asyncio.gather(
+        _ocr(pages, files, file_type, deadline, usage),
+        _ocr(note_pages, list(notes), "JPG", deadline, usage, feature="OCR_NOTE", prompt=OCR_NOTE_PROMPT),
+    )
+    for p in note_pages:  # 필기는 강의자료 다음 쪽 번호를 쓴다. 문제 근거·AI 질문이 쪽 번호 하나로 둘 다 가리킨다
+        p.page += len(pages)
+    if sum(len(p.text) for p in pages + note_pages) < MIN_TOTAL_CHARS:
         raise AIError("TEXT_EXTRACTION_FAILED")
 
-    categories = await _categorize(pages, deadline, usage)
+    categories = await _categorize(pages, note_pages, deadline, usage)
     return {
-        "pageCount": len(pages),
-        "pages": [{"page": p.page, "text": p.text} for p in pages],
+        "pageCount": len(pages) + len(note_pages),
+        "pages": [{"page": p.page, "text": p.text} for p in pages + note_pages],
+        "notePages": [p.page for p in note_pages],
         "categories": categories,
         "meta": usage.meta(),
     }
@@ -132,7 +141,7 @@ async def _fetch(client: httpx2.AsyncClient, url: str) -> bytes:
         raise AIError("FILE_FETCH_FAILED") from None
 
 
-async def _ocr(pages, files, file_type, deadline, usage):
+async def _ocr(pages, files, file_type, deadline, usage, feature="OCR", prompt=OCR_PROMPT):
     targets = [p for p in pages if p.needs_ocr]
     if not targets or file_type == "PPT":  # 슬라이드 속 이미지 글자는 MVP에서 읽지 않는다
         return
@@ -151,8 +160,8 @@ async def _ocr(pages, files, file_type, deadline, usage):
             for _ in range(OCR_ATTEMPTS):
                 try:
                     out = await llm.parse(
-                        "OCR",
-                        instructions=OCR_PROMPT,
+                        feature,
+                        instructions=prompt,
                         input=[{"role": "user", "content": [image]}],
                         schema=OcrText,
                         deadline=ocr_deadline,
@@ -173,9 +182,12 @@ def _data_url(jpeg: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
 
 
-async def _categorize(pages, deadline, usage) -> list[dict]:
+async def _categorize(pages, note_pages, deadline, usage) -> list[dict]:
     document = "\n".join(f'<page n="{p.page}">\n{p.text}\n</page>' for p in pages)
-    base_input = f"총 {len(pages)}쪽\n<document>\n{document}\n</document>"
+    notes = "\n".join(
+        f'<note n="{p.page}" label="필기 {p.page - len(pages)}쪽">\n{p.text}\n</note>' for p in note_pages
+    )
+    base_input = f"강의자료 총 {len(pages)}쪽, 필기 {len(note_pages)}쪽\n<document>\n{document}\n{notes}\n</document>"
     lengths = [len(p.text) for p in pages]
     note, error = "", AIError("LLM_FAILED")
 
@@ -190,7 +202,8 @@ async def _categorize(pages, deadline, usage) -> list[dict]:
                 usage=usage,
                 max_output_tokens=AI01_MAX_OUTPUT,
             )
-            return fix_categories(out.categories, lengths)
+            cats = fix_categories(out.categories, lengths)
+            return attach_notes(cats, out.notes, {p.page: p.text for p in pages}, {p.page: p.text for p in note_pages})
         except InvalidOutput as e:
             note = f"\n\n이전 출력에 문제가 있었다: {e}. 규칙에 맞게 다시 나눠라."
             error = AIError("LLM_FAILED")
