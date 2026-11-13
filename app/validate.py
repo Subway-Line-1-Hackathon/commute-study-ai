@@ -69,6 +69,50 @@ def fix_categories(drafts: list[CategoryDraft], page_lengths: list[int]) -> list
     return [{"order": i, **c} for i, c in enumerate(cats, 1)]
 
 
+MAX_ISSUES = 10
+MAX_ISSUE_TEXT = 200
+
+
+def check_issues(drafts, pages: dict[int, str]) -> list[dict]:
+    """원문이 그 쪽에 실제로 있는 지적만 API 응답 형태로 남긴다. 같은 원문을 두 번 지적하지 않는다."""
+    norm_pages = {p: normalize(t) for p, t in pages.items()}
+    out, seen = [], set()
+    for d in drafts:
+        if d.level != "wrong":  # 단순화·예외를 틀렸다고 알리면 학생이 자료를 불신한다 (eval/결과.md 11-13)
+            continue
+        quote, key = d.quote.strip(), normalize(d.quote)
+        if len(key) < MIN_QUOTE or key not in norm_pages.get(d.page, "") or key in seen:
+            continue
+        if not (0 < len(d.problem.strip()) <= MAX_ISSUE_TEXT and 0 < len(d.correction.strip()) <= MAX_ISSUE_TEXT):
+            continue
+        seen.add(key)
+        out.append({"page": d.page, "quote": quote, "problem": d.problem.strip(), "correction": d.correction.strip()})
+    return out[:MAX_ISSUES]
+
+
+MAX_NOTE_UNITS = 3  # 필기 한 쪽이 붙을 수 있는 최대 단원 수
+
+
+def attach_notes(cats: list[dict], drafts, lecture: dict[int, str], notes: dict[int, str]) -> list[dict]:
+    """필기 쪽을 관련 강의자료 쪽이 속한 단원마다 붙인다. 필기 한 쪽이 여러 단원 내용을 담을 수 있다.
+    모델이 빠뜨린 필기는 글자가 가장 많이 겹치는 단원에 붙인다."""
+    related = {d.page: [p for p in d.related_pages if p in lecture] for d in drafts if d.page in notes}
+    for c in cats:
+        c["notePages"] = []
+    for page, text in notes.items():
+        targets = related.get(page) or [max(lecture, key=lambda p: _overlap(text, lecture[p]))]
+        units = [c for c in cats if any(c["pageStart"] <= t <= c["pageEnd"] for t in targets)]
+        for c in units[:MAX_NOTE_UNITS]:
+            c["notePages"].append(page)
+    return cats
+
+
+def _overlap(a: str, b: str) -> int:
+    """두 글의 글자 두 개짜리 조각이 몇 개 겹치는지."""
+    grams = lambda t: {t[i : i + 2] for i in range(len(t) - 1)}  # noqa: E731
+    return len(grams(normalize(a)) & grams(normalize(b)))
+
+
 # ---------- AI-02 문제 ----------
 
 MAX_STEM = 300

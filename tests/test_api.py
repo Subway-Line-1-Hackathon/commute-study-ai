@@ -49,7 +49,7 @@ REQUESTS = {
     },
 }
 EXPECTED_KEYS = {
-    "/v1/materials/process": {"pageCount", "pages", "categories", "meta"},
+    "/v1/materials/process": {"pageCount", "pages", "notePages", "categories", "issues", "meta"},
     "/v1/questions/generate": {"questions", "shortfall", "capacity", "rejected", "meta"},
     "/v1/answers/judge-short": {"correct", "reason"},
     "/v1/answers/grade-essay": {"correct", "score", "points", "feedback"},

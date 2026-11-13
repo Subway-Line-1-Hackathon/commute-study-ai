@@ -1,9 +1,17 @@
-# AI 서버 API 명세 v0.4
+# AI 서버 API 명세 v0.5
 
 백엔드가 호출하는 내부 API다. 합의 전 초안이다.
 
 - 기준: 기능명세서 5장 AI-01~06 (2026-11-05 저장본), 백엔드 초기 스키마 `V1__init_schema.sql` (`Feat/#3` 브랜치, `develop` 머지 전)
 - 기능정의서 (3)~(7)과 백엔드 개발 명세서를 아직 못 봐서 필드가 바뀔 수 있다.
+
+**v0.5에서 바뀐 것 (11-13, 11-07 팀 결정 반영):**
+
+| 항목 | v0.4 | v0.5 | 백엔드 영향 |
+| --- | --- | --- | --- |
+| AI-01 필기 사진 | 없음 | 요청에 `noteUrls`(PNG·JPG 20장까지) 추가. 필기 쪽은 강의자료 다음 쪽 번호를 받는다 | 필기를 받으려면 있음. 보내지 않으면 지금과 같다 |
+| AI-01 응답 | - | `notePages`(필기 쪽 번호 목록), `categories[].notePages`(그 단원에 붙은 필기 쪽) 추가 | 필기를 쓰려면 있음. AI-02·AI-05에 단원 쪽과 그 단원의 필기 쪽을 함께 보낸다 |
+| AI-01 틀린 개념 | 없음 | 응답에 `issues`(쪽, 원문, 무엇이 틀렸는지, 바른 내용) 추가. 틀린 내용으로는 AI-02가 문제를 만들지 않는다 | 보여주려면 있음. 저장해서 요약본 화면에 "확인이 필요한 내용"으로 보여준다 |
 
 **v0.4 이후 추가 (11-10):** AI-02 `capacity`를 요청 유형과 상관없는 단원 전체 수로 바꿨다 (#49). AI-01 `fileType`에 `JPG` 추가. 사진 요청에는 PNG·JPG를 섞어도 된다. 기존 요청은 그대로 동작한다.
 
@@ -109,21 +117,37 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
   "fileType": "PDF",
   "kind": "LECTURE",
   "fileName": "자료구조_3주차.pdf",
-  "fileUrls": ["https://<project>.supabase.co/storage/v1/object/sign/..."]
+  "fileUrls": ["https://<project>.supabase.co/storage/v1/object/sign/..."],
+  "noteUrls": ["https://<project>.supabase.co/storage/v1/object/sign/필기1.jpg"]
 }
 ```
 
 - `fileUrls`: PDF·PPT는 1개, 사진(PNG·JPG)은 최대 20개를 쪽 순서대로 보낸다. 사진 요청에는 PNG와 JPG를 섞어 보내도 된다. `fileType`은 많은 쪽을 쓰면 되고, AI 서버는 파일 내용으로 형식을 확인한다. 폰 사진의 회전 정보(EXIF)는 AI 서버가 반영한다. iPhone의 HEIC는 받지 않으므로 앱에서 JPG로 바꿔 올린다.
+- `noteUrls` (선택): 학생이 손으로 쓴 필기 사진(PNG·JPG) 최대 20장. 슬라이드에 큰 개념만 있는 자료를 보완한다 (11-07 팀 결정). 없거나 빈 배열이면 지금과 같다.
+  - 필기 쪽은 강의자료 다음 번호를 받는다. 강의자료가 39쪽이면 필기는 40, 41, …쪽이다. 문제 근거(`sourcePage`)와 AI 질문이 쪽 번호 하나로 강의자료와 필기를 모두 가리킨다.
+  - 앱은 `notePages`에 든 쪽을 "필기 k쪽"으로 표시한다 (k = 쪽 번호 − 강의자료 쪽 수). 요약본은 이미 "(필기 1쪽)"으로 쓴다.
+  - 단원 경계는 강의자료만으로 정한다. 필기 한 쪽은 내용이 관련된 단원마다 붙는다 (최대 3개).
+  - 사진 장수 제한은 강의자료와 따로 20장이다. 다운로드·OCR 시간 때문에 늘리지 않는다.
 - `kind`: `PAST_EXAM`(족보)도 MVP에서는 `LECTURE`와 같이 단원화한다. 족보로 문제를 만드는 방식이 정해지면 바꾼다.
 
 **응답 200**
 
 ```json
 {
-  "pageCount": 2,
+  "pageCount": 3,
   "pages": [
     { "page": 1, "text": "스택은 나중에 넣은 데이터가 먼저 나오는 구조다." },
-    { "page": 2, "text": "큐는 먼저 넣은 데이터가 먼저 나오는 구조다." }
+    { "page": 2, "text": "큐는 먼저 넣은 데이터가 먼저 나오는 구조다." },
+    { "page": 3, "text": "스택 → 되돌리기(undo)에 씀\n큐 → 프린터 대기열" }
+  ],
+  "notePages": [3],
+  "issues": [
+    {
+      "page": 3,
+      "quote": "스택 → 먼저 넣은 게 먼저 나옴",
+      "problem": "스택의 입출력 순서를 반대로 적었어요.",
+      "correction": "스택은 나중에 넣은 것이 먼저 나오는 LIFO 구조예요."
+    }
   ],
   "categories": [
     {
@@ -131,6 +155,7 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
       "name": "스택과 큐",
       "pageStart": 1,
       "pageEnd": 2,
+      "notePages": [3],
       "summary": "- **스택(Stack)**: 나중에 넣은 데이터가 먼저 나오는 LIFO 구조다. (1쪽)\n- **큐(Queue)**: 먼저 넣은 데이터가 먼저 나오는 FIFO 구조다. (2쪽)"
     }
   ],
@@ -140,12 +165,22 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 
 | 응답 | 저장 위치 |
 | --- | --- |
-| `pageCount` | `material.page_count` |
+| `pageCount` | `material.page_count`. 필기 쪽을 포함한 전체 쪽 수 |
+| `issues` | 스키마에 없음. 보여주려면 자료에 저장한다 (JSON 컬럼 하나면 된다) |
+| `notePages`, `categories[].notePages` | 스키마에 없음. 필기를 받으려면 저장해야 한다. 단원의 필기 쪽은 AI-02·AI-05 요청의 `category.pages`에 단원 쪽과 함께 넣는다 |
 | `categories` | `category` |
 | `pages` | 스키마에 없음 (9장 1번). AI-02와 AI-05가 다시 입력으로 쓴다. 원본 파일이 아니므로 `EXPIRED` 뒤에도 남겨야 AI 질문이 동작한다 |
 | 에러 `message` | `material.error_message` |
 
-`categories`는 1쪽부터 마지막 쪽까지 빠짐없이, 겹치지 않게 이어진다. AI 서버가 검증한 뒤 반환한다.
+`categories`는 강의자료 1쪽부터 마지막 쪽까지 빠짐없이, 겹치지 않게 이어진다. AI 서버가 검증한 뒤 반환한다. 필기 쪽은 범위가 아니라 `notePages`로 붙는다.
+
+`issues`는 자료와 필기에서 학부 수업 수준으로 명백히 틀린 내용이다 (11-07 팀 결정: 자료 밖으로 출제를 넓히지 않되 틀린 개념은 AI가 점검).
+
+- `page`는 틀린 내용이 있는 쪽(필기 쪽 포함), `quote`는 그 쪽 원문 그대로다. AI 서버가 원문이 그 쪽에 있는지 확인한다.
+- `problem`, `correction`은 "~요"체 한 문장씩이다. 앱은 요약본 화면에 "확인이 필요한 내용"으로 보여준다.
+- 오탐을 줄이려고 단순화, 예외·엄밀한 정의, 일부러 보여 주는 잘못된 예는 넣지 않는다. 틀린 곳이 없으면 빈 배열이다. 최대 10개.
+- 점검은 단원화와 동시에 돈다. 점검이 실패해도 단원화는 성공하고 `issues`는 빈 배열이다.
+- 틀린 내용으로는 AI-02가 문제를 만들지 않는다. AI-02는 상태가 없어서 `issues`를 다시 보낼 필요는 없다 (출제 계획 단계에서 다시 걸러진다).
 
 `summary`는 마크다운이다. `- **개념**: 설명 (N쪽)` 형식의 목록 줄로만 이루어진다. 앱은 마크다운으로 그리고, TTS로 읽을 때는 `-`, `**` 기호를 빼고 읽는다. 문제 지문·보기·해설과 AI-03·06 문장은 마크다운이 없는 일반 문장이다.
 
@@ -185,6 +220,7 @@ UsageMeta  { model: string, inputTokens: int, outputTokens: int, elapsedMs: int,
 }
 ```
 
+- `category.pages`: 단원의 쪽(`pageStart`~`pageEnd`)과 그 단원에 붙은 필기 쪽(`notePages`)을 함께 보낸다. 필기 쪽에서 나온 문제는 `sourcePage`가 필기 쪽 번호다.
 - `excludeStems`: 이미 있는 문제의 지문. 같은 문제를 다시 만들지 않기 위해 보낸다.
 - `requests`의 `count` 합계는 40 이하다. 넘으면 `INVALID_REQUEST`다.
 - 사전 생성은 위 예시처럼 최대치 40문제를 O/X·객관식·단답 균등(14·13·13)으로 한 번에 요청한다. AI 서버가 자료 양에 맞춰 실제 개수를 정한다 (11-07 팀 결정). 난이도 구성은 아직 정해지지 않았다 (10장). 유형·난이도 조합마다 `requests` 항목을 나누면 된다.

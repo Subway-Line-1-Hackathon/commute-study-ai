@@ -34,6 +34,7 @@ class ProcessMaterialRequest(Model):
     kind: Kind
     file_name: str
     file_urls: list[HttpUrl] = Field(min_length=1, max_length=20)
+    note_urls: list[HttpUrl] = Field(default=[], max_length=20)  # 필기 사진(PNG·JPG). 강의자료 다음 쪽 번호를 받는다
 
     @model_validator(mode="after")
     def one_url_unless_image(self):
@@ -120,8 +121,26 @@ class CategoryDraft(BaseModel):
     summary: str
 
 
+class IssueDraft(BaseModel):
+    level: Literal["wrong", "nuance"]  # 모델이 스스로 가른다. 학생에게는 wrong만 알린다
+    page: int
+    quote: str  # 틀린 부분 원문. 코드가 자료에 있는지 확인한다
+    problem: str
+    correction: str
+
+
+class IssuesOut(BaseModel):
+    issues: list[IssueDraft]
+
+
+class NoteDraft(BaseModel):
+    page: int  # 필기 쪽 번호
+    related_pages: list[int]  # 관련 있는 강의자료 쪽 번호. 코드가 이 쪽들이 속한 단원마다 필기를 붙인다
+
+
 class CategoriesOut(BaseModel):
     categories: list[CategoryDraft]
+    notes: list[NoteDraft]
 
 
 class Point(BaseModel):
