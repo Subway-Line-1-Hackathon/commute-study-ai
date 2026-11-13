@@ -25,7 +25,8 @@ SPECS = [("OX", 14), ("MC", 13), ("SHORT", 13)]
 async def run(path: Path, order: int):
     data = json.loads(path.read_text(encoding="utf-8"))
     cat = next(c for c in data["categories"] if c["order"] == order)
-    pages = [p for p in data["pages"] if cat["pageStart"] <= p["page"] <= cat["pageEnd"]]
+    # 백엔드처럼 단원 쪽 범위와 그 단원에 붙은 필기 쪽을 함께 보낸다
+    pages = [p for p in data["pages"] if cat["pageStart"] <= p["page"] <= cat["pageEnd"] or p["page"] in cat.get("notePages", [])]
     req = GenerateQuestionsRequest(
         category={"categoryId": order, "name": cat["name"], "pages": pages},
         requests=[{"type": t, "difficulty": 2, "count": n} for t, n in SPECS],
